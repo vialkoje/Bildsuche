@@ -1,0 +1,118 @@
+# Bildsuche – Konfiguration
+# Änderungen werden im laufenden Betrieb erkannt (ca. 30 s), kein Neustart nötig.
+# Neue Suchbegriffe kosten keine Neuindexierung: die Bilder sind schon "angeschaut".
+#
+# Drei Stufen:
+#   1. Gesamtbild – schnelles Modell, alle Bilder
+#   2. Kacheln    – dasselbe Modell auf 4 Bildvierteln (findet LEGO am Rand / im Hintergrund)
+#   3. Prüfung    – starkes Modell (SigLIP 2) prüft die besten Kandidaten jeder Suche
+# Pro Suche gibt es zwei Schwellen:
+#   threshold          -> für "Bestätigt" (Score des starken Modells)
+#   coarse_threshold   -> für "Vorläufig" (noch ungeprüfte Treffer aus Stufe 1/2)
+#   candidates         -> so viele der besten Bilder werden MINDESTENS vom starken Modell geprüft;
+#                         die Menge wächst automatisch, solange am Ende noch Treffer auftauchen
+#   max_results        -> so viele bestätigte Motive zeigt die HTML-Seite als Bild (CSV: immer alle)
+
+settings:
+  web_base: "http://diskstation.local:8091"   # Adresse der Webseite (für Links in der CSV)
+  photo_root: /volume1/photo/Bildarchiv   # Bildpfad (NAS-Pfad). Wechsel legt einen eigenen Index an,
+                                          # Zurückwechseln nutzt den vorhandenen weiter.
+                                          # Der Ordner muss in compose.yaml eingebunden sein (dort: /volume1/photo).
+  rescan_interval_hours: 6          # wie oft nach neuen/geänderten Bildern geschaut wird
+  report_minutes: 20                # Zwischen-Report alle N Minuten, solange gerechnet wird
+  batch_size: 16
+  exclude_dirs: ["@eaDir", "#recycle", "#snapshot", ".@__thumb", "@Recycle", ".DS_Store", "PictureClassifier"]
+  min_file_kb: 20                   # winzige Dateien (Icons, Mini-Thumbnails) ignorieren
+  skip_raw_with_sibling: true       # RAW ignorieren, wenn JPG/HEIC gleichen Namens im selben Ordner liegt
+  random_order: true                # zufällige Reihenfolge -> Zwischen-Reports sind Stichproben aus allen Jahren
+  dedupe_similarity: 0.95           # fast identische Treffer (Serienbilder, Kopien) im Report bündeln; 0 = aus
+  tiles: true                       # Stufe 2 an/aus
+  rerank: true                      # Stufe 3 an/aus
+  rerank_model: ViT-B-16-SigLIP2-384
+  rerank_pretrained: webli
+
+  # Synology Photos – Album auf Knopfdruck (Zugangsdaten in docker/bildsuche/data/photos.env)
+  photos_url: "http://192.168.1.10:5000"    # IP-Adresse der NAS; bei Fehlern mit Weiterleitung: "https://192.168.1.10:5001"
+  photos_folder_prefix: auto                 # auto = aus photo_root ableiten: /volume1/photo/Bildarchiv -> /Bildarchiv
+  photos_share_path: /volume1/photo          # Freigabe, die Synology Photos als "Freigegebener Bereich" zeigt
+  photos_share_with: []                      # DSM-Benutzer, mit denen Alben geteilt werden, z. B. ["anna", "ben"]
+  photos_share_role: download                # download = Kopiervorlage, manage = Album bearbeitbar, view = nur ansehen
+  photos_album_prefix: "Bildsuche: "        # Vorbelegung für den Albumnamen auf der Report-Seite
+
+  # Report und Prüfung (Stufe 3)
+  preview_max: 300                  # so viele vorläufige Treffer zeigt der Report als Bild (CSV: alle)
+  expand_if_rate: 0.02              # Kandidatenmenge vergrößern, solange von den letzten 500 geprüften >= 2 % bestätigt werden
+  expand_step: 1000                 # ... jeweils um so viele Bilder
+  candidates_max: 30000             # Obergrenze je Suche
+
+  # Gegenkategorien: Ein Bild zählt nur dann als Treffer, wenn es dem Suchbegriff
+  # ähnlicher ist als diesen allgemeinen Motiven. Das macht den Score (0–1) lesbar.
+  default_negatives:
+    - "ein Foto von Menschen"
+    - "ein Foto einer Landschaft"
+    - "ein Foto eines Gebäudes"
+    - "ein Foto eines Zimmers"
+    - "ein Foto von Essen"
+    - "ein Foto eines Tieres"
+    - "ein Foto eines Autos"
+    - "ein Screenshot oder Dokument"
+    - "ein Foto"
+
+searches:
+  # 1) Fertige Modelle als Hauptmotiv
+  - name: lego_modelle
+    terms:
+      - "ein Bauwerk aus LEGO-Steinen"
+      - "ein fertig gebautes LEGO-Modell auf einem Tisch"
+      - "ein Modell aus bunten Klemmbausteinen"
+      - "a photo of a finished LEGO build"
+    threshold: 0.45
+    coarse_threshold: 0.35
+    candidates: 2500
+    max_results: 1000
+
+  # 2) Spielszenen: hier wird die SZENE beschrieben, nicht das Objekt.
+  #    Eigene Gegenkategorien, weil "ein Foto von Menschen" diese Bilder sonst schluckt.
+  - name: lego_spielszenen
+    terms:
+      - "Kinder spielen mit LEGO-Steinen auf dem Boden"
+      - "ein Kind baut mit LEGO"
+      - "Kinderzimmer mit LEGO-Steinen und LEGO-Figuren"
+      - "children playing with LEGO bricks"
+    negatives:
+      - "Kinder spielen mit Puppen oder Kuscheltieren"
+      - "Kinder spielen mit Holzbauklötzen"
+      - "Kinder malen oder basteln am Tisch"
+      - "Kinder spielen ein Brettspiel"
+      - "Kinder spielen draußen im Garten"
+      - "Kinder beim Essen"
+      - "ein Familienfoto im Wohnzimmer"
+      - "ein Foto"
+    threshold: 0.35
+    coarse_threshold: 0.25
+    candidates: 2500
+    max_results: 1500
+
+  # 3) Klettersteige (Via Ferrata)
+  #    Eigene Gegenkategorien: "Landschaft" und "Menschen" aus den Standardwerten würden
+  #    genau diese Bilder schlucken – hier geht es um die Abgrenzung zu ähnlichen Bergmotiven.
+  - name: klettersteig
+    terms:
+      - "eine Person an einem Klettersteig mit Drahtseil und Eisenbügeln"
+      - "Bergsteiger mit Helm und Klettersteigset an einer steilen Felswand"
+      - "ein Klettersteig mit Stahlseil und Leitern im Fels"
+      - "a person climbing a via ferrata with a steel cable"
+    negatives:
+      - "eine Wanderung auf einem Bergweg"
+      - "ein Bergpanorama ohne Menschen"
+      - "Sportklettern mit Seil in einer Kletterhalle"
+      - "Klettern an einem Felsen ohne Drahtseil"
+      - "eine Seilbahn oder ein Sessellift"
+      - "eine Gruppe von Menschen auf einem Gipfel"
+      - "ein Foto von Menschen"
+      - "ein Foto"
+    threshold: 0.45
+    coarse_threshold: 0.35
+    candidates: 2500
+    max_results: 1000
+    candidates_max: 8000            # Kappe: diese Suche hat zuletzt zu großzügig bestätigt

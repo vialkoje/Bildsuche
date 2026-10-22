@@ -1,0 +1,19 @@
+services:
+  bildsuche:
+    build: .
+    image: bildsuche:latest
+    container_name: bildsuche
+    restart: unless-stopped
+    cpu_shares: 256
+    mem_limit: 7g
+    ports:
+      - "8091:8091"
+    environment:
+      - TZ=Europe/Berlin
+      - THREADS=4
+    volumes:
+      - /volume1/photo:/volume1/photo:ro
+      - /volume1/docker/bildsuche/app:/app:ro
+      - /volume1/Bildsuche/config:/config
+      - /volume1/docker/bildsuche/data:/data
+      - /volume1/Bildsuche/reports:/reports
