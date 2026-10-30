@@ -19,6 +19,7 @@ Album in **Synology Photos** übernehmen. Keine Cloud, keine Bilder verlassen di
   CSV-Export, Konfigurationseditor mit Prüfung, Protokoll
 - **Synology-Photos-Alben:** alle bestätigten Treffer oder eine Auswahl per Klick ins Album, Teilen mit Benutzern,
   Album löschen, Probelauf
+- **Assistent für neue Suchen:** Schritt für Schritt mit Erklärungen, Probebildern aus dem eigenen Archiv und automatisch eingestellten Schwellen – ohne die Konfigurationsdatei anzufassen
 - **Ein Index pro Bildpfad:** Wechsel des Ordners legt einen weiteren Index an, Zurückwechseln nutzt den alten weiter
 - **Ressourcenschonend:** läuft mit niedriger Priorität rund um die Uhr, erkennt neue Bilder automatisch
 - Liest JPG, PNG, **HEIC** und **RAW** (über die eingebettete Vorschau); bündelt Serienbilder
@@ -46,6 +47,9 @@ Ausführlich, inklusive Album-Funktion und Berechtigungen: **[docs/INSTALLATION.
 | [docs/SPEZIFIKATION.md](docs/SPEZIFIKATION.md) | Architektur, Suchverfahren, Index, Konfigurationsreferenz, Webseite, Alben, Sicherheit, Betrieb |
 | [docs/FEHLERSUCHE.md](docs/FEHLERSUCHE.md) | Bekannte Stolpersteine mit Lösung (Container Manager, Photos-Rechte, iPad) |
 | [CHANGELOG.md](CHANGELOG.md) | Versionsgeschichte |
+| [docs/ENTSCHEIDUNGEN.md](docs/ENTSCHEIDUNGEN.md) | getroffene Architektur- und Produktentscheidungen |
+| [docs/OFFENE-PUNKTE.md](docs/OFFENE-PUNKTE.md) | offene Punkte und Ideen |
+| [CLAUDE.md](CLAUDE.md) | Projektwissen für die Weiterentwicklung mit Claude Code |
 
 ## Voraussetzungen
 
@@ -71,6 +75,11 @@ Zwischenergebnisse sind sofort nutzbar; die Reports werden alle 20 Minuten aktua
 - Die Webseite hat **kein Passwort**. Sie gehört nur ins Heimnetz, nicht ins Internet.
 - Für die Album-Funktion wird ein eigener DSM-Benutzer mit Leserechten empfohlen; dessen Zugangsdaten
   stehen nur in `data/photos.env` (nicht im Repository).
+
+## Entwicklung
+
+Vor jedem Commit: `python3 tools/check.py` (Syntax, Konfig-Vorlage, generiertes JavaScript, keine persönlichen Werte).
+Ausrollen: `app/bildsuche.py` auf die NAS kopieren und den Container neu starten (Details in [CLAUDE.md](CLAUDE.md)).
 
 ## Lizenz
 

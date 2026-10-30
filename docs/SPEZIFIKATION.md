@@ -1,6 +1,6 @@
 # Spezifikation
 
-Stand: Version 2026-10-21e
+Stand: Version 2026-10-30c
 
 ## Zweck
 
@@ -151,6 +151,7 @@ Port 8091, ohne Passwort. Abschalten: `WEB_PORT=0` in `compose.yaml`.
 | `/protokoll`, `/protokoll.txt` | Programmprotokoll, neueste oben, Filter, Download |
 | `/api/album`, `/api/album/status` | Album-Aufträge |
 | `/api/report/delete` | Löschen eines älteren Reports (nicht für aktive Suchen) |
+| `/assistent`, `/api/assistent/*` | Assistent für neue Suchen (Info, Probesuche, Probebilder, Auswerten und Speichern) |
 
 **Bildansicht:** „Bild öffnen“ zeigt das Bild groß über dem Report (auch als iPad-Web-App), Blättern per Wischen,
 Pfeilen oder Tastatur, „Auswählen“ fürs Album, Schließen per ✕, Esc oder Zurück-Geste.
@@ -160,6 +161,32 @@ geschrieben. Reports von Suchen, die nicht mehr existieren, erscheinen auf der �
 
 **Protokoll:** zusätzlich zur Containerausgabe in `data/logs/bildsuche.log` (rotierend, 6 × 2 MB), inklusive Abstürzen
 und Webserver-Fehlern. Nur im Container Manager: Build-Ausgaben, Download-Fortschritt, harte Abbrüche von außen.
+
+## Assistent „Neue Suche anlegen“
+
+Ein Knopf auf der Übersicht öffnet einen Fragebogen, mit dem auch Laien eine gute Suche anlegen – ohne Sprachmodell,
+komplett lokal. Jede Frage erklärt, warum sie gestellt wird und wie eine gute Antwort aussieht.
+
+| Schritt | Frage | Wirkung |
+|---|---|---|
+| 1 | Was möchtest du finden? (ein Satz wie eine Bildunterschrift) | Grundlage der Formulierungen |
+| 2 | Situation oder Gegenstand im Mittelpunkt? | Szene: eigene Gegenbeschreibungen statt der Standardliste; Objekt: zusätzliche Nahaufnahme-Formulierung |
+| 3 | Wer ist zu sehen, wo? | Formulierungsvarianten, Vorschläge für Ausschlüsse |
+| 4 | Formulierungen prüfen (2–4 Zeilen) | `terms`; Verneinungen („kein“, „ohne“) werden abgefangen |
+| 5 | Was soll nicht gefunden werden? (Vorschläge zum Antippen) | `negatives` (+ „ein Foto“) |
+| 6 | Wie streng? (vollständig / ausgewogen / treffsicher) | Start-Schwelle 0,30 / 0,40 / 0,50 |
+| 7 | Name | eindeutiger Suchname (Kleinbuchstaben, Ziffern, `_`) |
+| 8 | Probebilder bewerten | Kalibrierung und Freigabe |
+
+**Probesuche:** bis zu 16 Bilder aus dem Archiv auf gestaffelten Rängen (1 … ca. 400), Serienbilder übersprungen.
+Grob-Score aus dem vorhandenen Index (Sekunden); für bereits geprüfte Bilder zusätzlich der Prüf-Score des starken Modells.
+Bei „passt nicht“ kann die Nutzerin notieren, was stattdessen zu sehen ist – das wird beim nächsten Versuch Gegenbeschreibung.
+
+**Freigabe:** Gespeichert wird nur, wenn von den 8 wahrscheinlichsten bewerteten Bildern mindestens 60 % passen.
+**Kalibrierung:** Grob- und Prüf-Schwelle werden so gewählt, dass sie Ja- und Nein-Bilder am besten trennen
+(F-Maß; Gewichtung nach Strenge). Ohne genügend geprüfte Bilder gilt der Startwert der Strenge.
+**Speichern:** Der Abschnitt wird mit Kommentar am Ende von `searches:` eingefügt (Kommentare bleiben erhalten),
+vorher geprüft und gesichert; wirksam nach ca. 30 Sekunden. Die Prüfung der neuen Kandidaten läuft danach im Hintergrund.
 
 ## Synology-Photos-Alben
 

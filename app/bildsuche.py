@@ -68,7 +68,7 @@ try:
 except Exception:  # pragma: no cover
     rawpy = None
 
-VERSION = "2026-10-21e"
+VERSION = "2026-10-30c"
 CONFIG_PATH = os.environ.get("CONFIG", "/config/searches.yaml")
 REPORT_DIR = os.environ.get("REPORTS", "/reports")
 THREADS = int(os.environ.get("THREADS", "2"))
@@ -148,7 +148,7 @@ DEFAULTS = {
     "link_root": "",
     "web_base": "http://diskstation.local:8091",   # für die Bild-Links in der CSV (Adresse der NAS)
     # Synology Photos (Alben auf Knopfdruck). Zugangsdaten stehen in /data/photos.env
-    "photos_url": "http://192.168.1.10:5000",   # Adresse der NAS (IP, nicht .local – im Container nicht auflösbar)
+    "photos_url": "http://192.168.1.10:5000",   # Adresse der NAS (IP, .local löst der Container meist nicht auf)
     "photos_folder_prefix": "auto",              # Ordner von photo_root im "Freigegebenen Bereich"; auto = aus photo_root
     "photos_share_path": "/volume1/photo",       # NAS-Pfad, der in Photos der "Freigegebene Bereich" ist
     "photos_share_with": [],   # Album wird mit diesen DSM-Benutzern geteilt, z. B. ["anna", "ben"]
@@ -1124,8 +1124,12 @@ def write_status(counts, summary, final):
     write_index(counts, summary, final)
 
 
+LAST_INDEX = [None]      # letzte Daten der Übersicht – damit sie nach dem Löschen sofort neu geschrieben werden kann
+
+
 def write_index(counts, summary, final):
     """Übersichtsseite reports/index.html – im Browser über die Webseite oder als Datei."""
+    LAST_INDEX[0] = (counts, summary, final)
     n, g, t, c, r = counts
     pct = lambda a, b: f"{100 * a / b:.0f} %" if b else "–"  # noqa: E731
     pw = lambda a, b: f"{100 * a / b:.1f}%" if b else "0%"  # noqa: E731
@@ -1176,9 +1180,12 @@ td.num,th.num{{text-align:right;font-variant-numeric:tabular-nums}}
 a{{color:#2a6fdb;text-decoration:none}} a:hover{{text-decoration:underline}}
 .bar{{height:6px;background:#ddd;border-radius:3px;overflow:hidden;margin:2px 0 8px;max-width:420px}}
 .bar>div{{height:100%;background:#2a6fdb}}
+a.newbtn{{display:inline-block;padding:10px 16px;border-radius:8px;background:#2a6fdb;color:#fff;font-weight:600}}
+a.newbtn:hover{{text-decoration:none;background:#1f5bbd}}
 button.del{{font:inherit;font-size:13px;padding:4px 10px;border-radius:6px;border:1px solid #c0392b;background:transparent;color:#c0392b;cursor:pointer}}
 </style></head><body>
 <h1>Bildsuche</h1>
+<p><a class="newbtn" href="/assistent">＋ Neue Suche anlegen</a></p>
 <p><a href="/config">⚙︎ Konfiguration ansehen &amp; bearbeiten</a> · <a href="/protokoll">☰ Protokoll</a></p>
 <div class="meta">Bildpfad: <b>{html.escape(CURRENT_ROOT[0])}</b> · Stand {datetime.now():%d.%m.%Y %H:%M} · {state}<br>
 Stufe 1 Gesamtbild: {g} / {n} ({pct(g, n)})<div class="bar"><div style="width:{pw(g, n)}"></div></div>
@@ -1626,6 +1633,227 @@ def album_job(name, mode="all", title=None, selected=None, similar=False):
         job["running"] = False
 
 
+# ================================================================ Assistent für neue Suchen
+ENGINE = [None]          # laufende Engine (für Probesuchen aus der Webseite)
+PROBES = {}              # token -> {"items": [...], "time": t}
+PROBE_LOCK = threading.Lock()
+PROBE_RANKS = [0, 1, 2, 3, 5, 7, 10, 14, 20, 30, 45, 70, 110, 170, 260, 400]
+STRICTNESS = {   # Strenge -> (Schwelle "Bestätigt", Abstand zur Grob-Schwelle, beta für die Kalibrierung)
+    "vollstaendig": (0.30, 0.10, 2.0),
+    "ausgewogen": (0.40, 0.10, 1.0),
+    "treffsicher": (0.50, 0.15, 0.5),
+}
+
+
+def assist_slug(text):
+    t = str(text or "").lower()
+    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        t = t.replace(a, b)
+    t = re.sub(r"[^a-z0-9]+", "_", t).strip("_")
+    return t[:40].strip("_") or "neue_suche"
+
+
+def assist_clean(lines):
+    out = []
+    for x in lines or []:
+        x = " ".join(str(x).split()).strip(" -•")
+        if x and x.lower() not in {o.lower() for o in out}:
+            out.append(x[:200])
+    return out
+
+
+def assist_search(draft, settings):
+    """Entwurf aus dem Assistenten -> Suche im Format von parse_config (+ Rohdaten für die YAML-Datei)."""
+    terms = assist_clean(draft.get("terms"))
+    if not terms:
+        raise ValueError("Bitte mindestens eine Formulierung angeben.")
+    negs = assist_clean(draft.get("negatives"))
+    kind = draft.get("kind") or "szene"
+    if negs or kind == "szene":
+        if "ein foto" not in {n.lower() for n in negs}:
+            negs.append("ein Foto")
+        own_negs = negs
+    else:
+        own_negs = None                       # Objekt ohne eigene Liste -> Standard-Gegenkategorien
+    strict = draft.get("strict") if draft.get("strict") in STRICTNESS else "ausgewogen"
+    thr, gap, _ = STRICTNESS[strict]
+    return {
+        "name": assist_slug(draft.get("name") or draft.get("motiv")),
+        "terms": terms,
+        "negatives": own_negs if own_negs else list(settings["default_negatives"]),
+        "own_negatives": own_negs,
+        "threshold": thr,
+        "coarse_threshold": round(max(0.15, thr - gap), 2),
+        "strict": strict,
+    }
+
+
+def assist_thumb(path, big=False):
+    tdir = os.path.join(DATA_DIR, "thumbs")
+    os.makedirs(tdir, exist_ok=True)
+    size = 1600 if big else 520
+    out = os.path.join(tdir, hashlib.sha1(f"{path}|{size}".encode("utf-8")).hexdigest() + ".jpg")
+    if not os.path.exists(out):
+        im = load_image(path, max_side=size)
+        im.convert("RGB").save(out, "JPEG", quality=82)
+    return out
+
+
+def assist_probe(draft):
+    eng = ENGINE[0]
+    if eng is None or not eng.store.has_g.any():
+        raise RuntimeError("Die Bildsuche ist noch nicht bereit (der Index wird gerade geladen). "
+                           "Bitte in ein paar Minuten noch einmal versuchen.")
+    settings = eng.settings
+    q = assist_search(draft, settings)
+    s = eng.store
+    score, _ = s.coarse(eng.base.text_matrix(q), eng.base.logit_scale)
+    order = np.argsort(-score)
+    final_s = {}
+    if eng.strong is not None and s.R:
+        try:
+            final_s, _ = eng.final_scores(q)
+        except Exception as e:
+            log.warning("Assistent: Prüf-Scores nicht verfügbar (%s)", e)
+    picked, items = [], []
+    thr = float(settings.get("dedupe_similarity") or 0.95)
+    for r in PROBE_RANKS:
+        k = r
+        while k < len(order) and k < r + 40:   # Serienbilder überspringen
+            i = int(order[k])
+            if score[i] <= 0:
+                break
+            g = s.G[i].astype(np.float32)
+            if all(float(g @ s.G[j].astype(np.float32)) < thr for j in picked):
+                break
+            k += 1
+        if k >= len(order) or score[int(order[k])] <= 0:
+            continue
+        i = int(order[k])
+        if i in picked:
+            continue
+        picked.append(i)
+        items.append({"path": s.paths[i], "rank": k + 1, "coarse": round(float(score[i]), 3),
+                      "final": round(final_s[i], 3) if i in final_s else None})
+    token = hashlib.sha1(f"{time.time()}{random.random()}".encode()).hexdigest()[:16]
+    with PROBE_LOCK:
+        for t in [t for t, v in PROBES.items() if time.time() - v["time"] > 3 * 3600]:
+            PROBES.pop(t, None)
+        PROBES[token] = {"items": items, "time": time.time()}
+    log.info("Assistent: Probesuche '%s' mit %d Bildern.", q["name"], len(items))
+    return {"token": token, "name": q["name"],
+            "items": [{"i": n, "rank": it["rank"], "score": it["coarse"],
+                       "rel": os.path.relpath(it["path"], settings["photo_root"])} for n, it in enumerate(items)]}
+
+
+def _best_threshold(pairs, beta, default, lo=0.15, hi=0.85):
+    """pairs: [(score, ja?)] -> Schwelle, die Ja- und Nein-Bilder am besten trennt (F-beta)."""
+    yes = [s for s, y in pairs if y]
+    no = [s for s, y in pairs if not y]
+    if not yes:
+        return default
+    if not no:
+        return round(min(max(lo, min(default, min(yes) - 0.02)), hi), 2)
+    cands = sorted({round(x, 3) for x in [default] + [(a + b) / 2 for a in yes + no for b in yes + no]})
+    best, best_f = default, -1.0
+    for t in cands:
+        tp = sum(1 for s in yes if s >= t)
+        fp = sum(1 for s in no if s >= t)
+        fn = len(yes) - tp
+        if tp == 0:
+            continue
+        p, r = tp / (tp + fp), tp / (tp + fn)
+        f = (1 + beta ** 2) * p * r / (beta ** 2 * p + r)
+        if f > best_f + 1e-9 or (abs(f - best_f) < 1e-9 and abs(t - default) < abs(best - default)):
+            best, best_f = t, f
+    return round(min(max(lo, best), hi), 2)
+
+
+def assist_evaluate(draft, token, labels):
+    """Bewertung der Probebilder -> (in Ordnung?, Meldung, Suche mit kalibrierten Schwellen)."""
+    with PROBE_LOCK:
+        probe = PROBES.get(token)
+    if not probe:
+        raise ValueError("Die Probesuche ist abgelaufen – bitte die Probebilder neu laden.")
+    eng = ENGINE[0]
+    settings = eng.settings if eng else load_config()[0]
+    q = assist_search(draft, settings)
+    items = probe["items"]
+    rated = [(items[int(k)], bool(v)) for k, v in labels.items() if str(k).isdigit() and int(k) < len(items)]
+    if len(rated) < min(8, len(items)):
+        raise ValueError("Bitte bewerte mindestens 8 Bilder.")
+    top = sorted(rated, key=lambda x: x[0]["rank"])[:8]
+    hit_rate = sum(1 for _, y in top if y) / len(top)
+    _, gap, beta = STRICTNESS[q["strict"]]
+    q["coarse_threshold"] = _best_threshold([(it["coarse"], y) for it, y in rated], beta,
+                                            q["coarse_threshold"], lo=max(0.15, q["coarse_threshold"] - 0.15))
+    fin = [(it["final"], y) for it, y in rated if it["final"] is not None]
+    if sum(1 for _, y in fin if y) >= 2:
+        q["threshold"] = _best_threshold(fin, beta, q["threshold"], lo=0.2)
+    ok = hit_rate >= 0.6
+    if ok:
+        msg = (f"{round(hit_rate * 100)} % der wahrscheinlichsten Probebilder passen – die Suche ist gut genug "
+               f"zum Speichern.")
+    else:
+        msg = (f"Nur {round(hit_rate * 100)} % der wahrscheinlichsten Probebilder passen. So würde die Suche zu "
+               f"viele falsche Bilder liefern. Schreib bei den Nein-Bildern kurz dazu, was stattdessen zu sehen "
+               f"ist, oder ändere die Formulierungen – dann neu probieren.")
+    return ok, msg, q, hit_rate
+
+
+def assist_yaml_block(q, motiv, indent="  "):
+    j = lambda x: json.dumps(str(x), ensure_ascii=False)  # noqa: E731  (JSON-Strings sind gültiges YAML)
+    i2 = indent + "  "
+    lines = [f"{indent}# {' '.join(str(motiv).split())[:100]} – angelegt mit dem Assistenten am "
+             f"{datetime.now():%d.%m.%Y}",
+             f"{indent}- name: {q['name']}", f"{i2}terms:"]
+    lines += [f"{i2}  - {j(t)}" for t in q["terms"]]
+    if q.get("own_negatives"):
+        lines.append(f"{i2}negatives:")
+        lines += [f"{i2}  - {j(n)}" for n in q["own_negatives"]]
+    lines += [f"{i2}threshold: {q['threshold']:.2f}", f"{i2}coarse_threshold: {q['coarse_threshold']:.2f}",
+              f"{i2}candidates: 2500", f"{i2}max_results: 1000"]
+    return "\n".join(lines) + "\n"
+
+
+def config_add_search(q, motiv):
+    """Hängt die Suche in den Abschnitt 'searches:' der Konfiguration ein (Kommentare bleiben erhalten)."""
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        text = f.read()
+    _, searches = parse_config(yaml.safe_load(text) or {})
+    if q["name"] in {s["name"] for s in searches}:
+        raise ValueError(f"Es gibt schon eine Suche „{q['name']}“ – bitte einen anderen Namen wählen.")
+    lines = text.splitlines()
+    start = next((n for n, l in enumerate(lines) if re.match(r"^searches\s*:", l)), None)
+    if start is None:
+        lines += ["", "searches:"]
+        start = len(lines) - 1
+    elif re.match(r"^searches\s*:\s*\[\s*\]", lines[start]):
+        lines[start] = "searches:"
+    end = len(lines)
+    for n in range(start + 1, len(lines)):
+        if lines[n].strip() and not lines[n].startswith((" ", "\t", "#", "-")):
+            end = n
+            break
+    indent = "  "
+    for l in lines[start + 1:end]:
+        m = re.match(r"^(\s*)- ", l)
+        if m:
+            indent = m.group(1)
+            break
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    block = assist_yaml_block(q, motiv, indent).rstrip("\n").split("\n")
+    new = lines[:end] + [""] + block + lines[end:]
+    new_text = "\n".join(new) + "\n"
+    ok, m = validate_config_text(new_text)
+    if not ok:
+        raise ValueError("Die neue Konfiguration wäre ungültig, nichts gespeichert: " + m)
+    save_config_text(new_text)
+    log.info("Assistent: neue Suche '%s' in die Konfiguration eingetragen.", q["name"])
+    return assist_yaml_block(q, motiv, indent)
+
+
 def read_log_lines(n, newest_first=True):
     """Die letzten n Zeilen des Protokolls (über die rotierten Dateien hinweg)."""
     lines = []
@@ -1690,6 +1918,236 @@ button{{font:inherit;padding:4px 12px;border-radius:6px;border:1px solid #2a6fdb
 </form>
 <div id="log">{body}</div>
 </body></html>"""
+
+
+ASSIST_PAGE = r"""<!doctype html><html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bildsuche – Neue Suche anlegen</title>
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--ink:#222;--mute:#777;--line:#e3e3e0;--acc:#2a6fdb;--ok:#1e8e3e;--bad:#c0392b;--tint:#eef3fb}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1c1e;--card:#2c2c2e;--ink:#eee;--mute:#999;--line:#444;--tint:#23304a}}
+*{box-sizing:border-box} body{font-family:-apple-system,system-ui,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
+main{max-width:860px;margin:0 auto;padding:20px 16px 80px}
+a{color:var(--acc);text-decoration:none}
+h1{font-size:24px;margin:8px 0 2px} .step{color:var(--mute);font-size:14px}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:10px 0 18px} .bar>div{height:100%;background:var(--acc);transition:width .2s}
+.card{background:var(--card);border-radius:12px;padding:18px 18px 16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+h2{font-size:20px;margin:0 0 10px}
+.why{background:var(--tint);border-radius:10px;padding:12px 14px;font-size:14.5px;line-height:1.5;margin:0 0 14px}
+.why>b:first-child{display:block;margin-bottom:4px}
+.ex{font-size:14px;color:var(--mute);margin:6px 0 0;line-height:1.5}
+textarea,input[type=text]{width:100%;font:inherit;font-size:16px;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+textarea{min-height:110px;resize:vertical}
+.opt{display:flex;gap:12px;align-items:flex-start;padding:12px;border:1px solid var(--line);border-radius:10px;margin:8px 0;cursor:pointer}
+.opt input{margin-top:4px;transform:scale(1.2)} .opt small{display:block;color:var(--mute);margin-top:3px;line-height:1.4}
+.opt.on{border-color:var(--acc);background:var(--tint)}
+.group{margin:14px 0 4px;font-weight:600}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
+.chip{font:inherit;font-size:14px;padding:7px 12px;border-radius:16px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+.chip.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.nav{display:flex;justify-content:space-between;gap:10px;margin-top:18px}
+button.p,button.s{font:inherit;font-size:16px;padding:10px 18px;border-radius:8px;cursor:pointer;border:1px solid var(--acc)}
+button.p{background:var(--acc);color:#fff} button.s{background:transparent;color:var(--acc)}
+button:disabled{opacity:.45;cursor:default}
+.warn{color:var(--bad);font-size:14px;margin-top:8px;white-space:pre-line} .msg{margin-top:12px;font-size:15px;white-space:pre-line;line-height:1.5}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:12px}
+.pc{background:var(--card);border:3px solid var(--line);border-radius:10px;overflow:hidden}
+.pc.yes{border-color:var(--ok)} .pc.no{border-color:var(--bad)}
+.pc img{width:100%;height:140px;object-fit:cover;display:block;background:var(--line);cursor:zoom-in}
+.pc .b{display:flex;gap:6px;padding:8px}
+.pc .b button{flex:1;font:inherit;font-size:15px;padding:7px 0;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+.pc.yes .y{background:var(--ok);color:#fff;border-color:var(--ok)} .pc.no .n{background:var(--bad);color:#fff;border-color:var(--bad)}
+.pc .r{font-size:12px;color:var(--mute);padding:0 8px 6px}
+.pc input{display:none;margin:0 8px 8px;width:calc(100% - 16px);font-size:14px;padding:6px 8px}
+.pc.no input{display:block}
+pre{background:var(--tint);padding:12px;border-radius:8px;overflow:auto;font-size:13px}
+#zoom{position:fixed;inset:0;background:rgba(0,0,0,.9);display:none;align-items:center;justify-content:center;z-index:9}
+#zoom img{max-width:96vw;max-height:92vh;object-fit:contain} #zoom.on{display:flex}
+</style></head><body><main>
+<p><a href="/">← Übersicht</a></p>
+<h1>Neue Suche anlegen</h1>
+<div class="step" id="stepinfo"></div>
+<div class="bar"><div id="prog"></div></div>
+<div class="card" id="card"></div>
+<div id="zoom" onclick="this.classList.remove('on')"><img alt=""></div>
+</main>
+<script>
+const D = {motiv:'', kind:'', wer:[], wo:'egal', terms:[], termsTouched:false, negatives:[], strict:'', name:'', nameTouched:false};
+let INFO = {ready:false, names:[], default_negatives:[]}, step = 0, PROBE = null, LABELS = {}, NOTES = {};
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const lines = t => t.split('\n').map(x => x.trim()).filter(Boolean);
+const cap = s => s ? s[0].toUpperCase() + s.slice(1) : s;
+function slug(t){ t = (t||'').toLowerCase().replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss');
+  return t.replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,40).replace(/_+$/,'') || 'neue_suche'; }
+function draft(){ return {motiv:D.motiv, kind:D.kind, terms:D.terms, negatives:D.negatives, strict:D.strict, name:D.name}; }
+
+function suggestTerms(){
+  const base = cap(D.motiv.trim().replace(/[.!?]+$/,''));
+  const t = [base];
+  if (D.wo === 'drinnen') t.push(base + ' in einem Zimmer');
+  if (D.wo === 'draussen') t.push(base + ' im Freien');
+  if (D.kind === 'objekt') t.push('Nahaufnahme: ' + base);
+  return t;
+}
+function suggestNegatives(){
+  // [Vorschlag, Kernbegriffe] – ein Vorschlag entfällt, wenn sein Kern im Gesuchten vorkommt
+  const s = [];
+  const kids = D.wer.includes('kinder'), adults = D.wer.includes('erwachsene') || D.wer.includes('familie');
+  if (kids) s.push(['Kinder beim Essen am Tisch', ['essen','mahlz','frühs','mittag','abend']],
+                   ['Kinder machen Hausaufgaben oder malen', ['hausa','malen','malt ','zeich','schul']],
+                   ['Kinder basteln am Tisch', ['bastel']],
+                   ['ein Kindergeburtstag mit Kuchen und Geschenken', ['geburt','kuche','torte','gesch','feier','party']],
+                   ['Kinder schauen auf ein Tablet oder Handy', ['table','handy','ipad','fernse']],
+                   ['Kinder spielen draußen im Garten', ['garte','drauß','spielp','schauk','rutsch']]);
+  if (adults) s.push(['ein Familienfoto, alle schauen in die Kamera', ['gruppenf','portr','posie','kamera']],
+                     ['Menschen beim Essen am Tisch', ['essen','mahlz','resta']],
+                     ['eine Feier mit vielen Gästen', ['feier','party','fest ','hochz','gäste']]);
+  if (D.wo === 'draussen') s.push(['ein Bergpanorama oder eine weite Landschaft', ['berg','lands','panor','gipfe','ausbl']],
+                                  ['eine Wanderung auf einem Weg', ['wande','weg ','spazi']]);
+  if (D.kind === 'objekt' || D.wer.includes('niemand')) s.push(['ein Foto eines Zimmers', ['zimme','wohnz','küche','raum']],
+                                                               ['ein Foto von Essen', ['essen','kuche','torte','gerich','speis']],
+                                                               ['eine Landschaft', ['lands','berg','natur','panor']]);
+  s.push(['ein Screenshot oder Dokument', ['scree','dokum','text','brief']]);
+  const me = (' ' + D.motiv + ' ' + D.terms.join(' ') + ' ').toLowerCase();
+  const seen = new Set();
+  return s.filter(([n, core]) => !core.some(c => me.includes(c)) && !seen.has(n) && seen.add(n)).map(([n]) => n);
+}
+
+const STEPS = [
+ { title: 'Was möchtest du finden?',
+   why: '<b>Warum diese Frage?</b>Die Bildsuche vergleicht deine Beschreibung mit jedem Foto im Archiv. Sie versteht Deutsch und ganze Sätze – am besten beschreibst du das Bild so, wie du es als Bildunterschrift in ein Fotoalbum schreiben würdest. Einzelne Wörter wie „Würfel“ funktionieren deutlich schlechter als ein kurzer Satz, der die ganze Situation beschreibt.',
+   body: () => `<textarea id="f" placeholder="z. B. Kinder spielen ein Würfelspiel am Tisch">${esc(D.motiv)}</textarea>
+     <p class="ex">Gute Beispiele: „Kinder bauen eine Sandburg am Strand“ · „unsere Geburtstagstorten mit Kerzen“ · „Oma liest den Kindern vor“.<br>
+     Weniger gut: „Sand“ · „Torte“ · „schöne Momente“ (zu allgemein, das Bild lässt sich nicht vorstellen).</p>`,
+   save: () => { const v = document.getElementById('f').value.trim(); if (v !== D.motiv) { D.motiv = v; D.termsTouched = false; if (!D.nameTouched) D.name = ''; } },
+   check: () => D.motiv.length >= 4 || 'Bitte beschreibe kurz, was auf den Bildern zu sehen sein soll.' },
+
+ { title: 'Was steht auf den Bildern im Mittelpunkt?',
+   why: '<b>Warum diese Frage?</b>Das ist die wichtigste Entscheidung für eine gute Suche. Auf normalen Familienfotos sind Gegenstände oft nur klein zu sehen – ein Würfel ist vielleicht so groß wie ein Fingernagel. Die Bildsuche erkennt dann viel zuverlässiger die <i>Situation</i> („Kinder sitzen am Tisch und spielen“) als den kleinen Gegenstand. Geht es dagegen um etwas, das groß und deutlich im Bild ist (eine Torte, ein Auto, ein Bauwerk), beschreibt man besser den Gegenstand selbst.',
+   body: () => opt('kind','szene','Eine Situation – Menschen tun etwas','z. B. Kinder spielen, die Familie wandert, jemand backt. Der Gegenstand darf klein oder nebensächlich sein.')
+            + opt('kind','objekt','Ein Gegenstand oder Motiv, groß im Bild','z. B. eine Geburtstagstorte, ein LEGO-Modell, ein Sonnenuntergang, ein Auto.'),
+   save: () => {}, check: () => !!D.kind || 'Bitte wähle eine der beiden Möglichkeiten.' },
+
+ { title: 'Wer ist zu sehen – und wo?',
+   why: '<b>Warum diese Frage?</b>Daraus macht der Assistent zusätzliche Formulierungen und schlägt passende Ausschlüsse vor (zum Beispiel „Kinder beim Essen“, wenn es um Kinder geht). Wenn du dir nicht sicher bist, wähle „egal“ – das schadet nicht.',
+   body: () => '<div class="group">Wer ist meistens auf den Bildern? (mehrere möglich)</div><div class="chips">'
+            + [['kinder','Kinder'],['erwachsene','Erwachsene'],['familie','die ganze Familie'],['niemand','niemand – nur das Motiv']]
+              .map(([k,l]) => `<button class="chip${D.wer.includes(k)?' on':''}" onclick="togWer('${k}')">${l}</button>`).join('') + '</div>'
+            + '<div class="group">Wo sind die Bilder meistens aufgenommen?</div>'
+            + opt('wo','drinnen','Drinnen','in der Wohnung, im Haus, in einer Halle') + opt('wo','draussen','Draußen','im Garten, in der Natur, unterwegs') + opt('wo','egal','Egal / beides',''),
+   save: () => {}, check: () => true },
+
+ { title: 'Passen diese Formulierungen?',
+   why: '<b>Warum diese Frage?</b>Die Suche arbeitet mit mehreren Formulierungen gleichzeitig und mittelt sie – das macht sie robuster. Jede Zeile sollte das <i>ganze Bild</i> beschreiben, wie eine Bildunterschrift. Du kannst die Vorschläge ändern, löschen oder eigene ergänzen; zwei bis vier Zeilen sind ideal. Eine englische Zeile („children playing a board game“) kann zusätzlich helfen, ist aber kein Muss.<br><br><b>Wichtig:</b> Schreib hier nichts, was <i>nicht</i> zu sehen sein soll („ohne Karten“, „keine Erwachsenen“) – Verneinungen versteht die Bildsuche nicht. Das kommt im nächsten Schritt dran.',
+   enter: () => { if (!D.termsTouched || !D.terms.length) D.terms = suggestTerms(); },
+   body: () => `<textarea id="f" rows="5">${esc(D.terms.join('\n'))}</textarea><p class="ex">Eine Formulierung pro Zeile.</p>`,
+   save: () => { const t = lines(document.getElementById('f').value); if (t.join('\n') !== D.terms.join('\n')) D.termsTouched = true; D.terms = t; },
+   check: () => { if (!D.terms.length) return 'Bitte mindestens eine Formulierung eintragen.';
+     const neg = D.terms.filter(t => /(^|\s)(kein|keine|keinen|keiner|nicht)(\s|$)/i.test(t));
+     if (neg.length) return 'Diese Zeilen enthalten eine Verneinung – die versteht die Bildsuche nicht:\n„' + neg.join('“, „') + '“\nBitte umformulieren und das Unerwünschte im nächsten Schritt eintragen.';
+     const ohne = D.terms.filter(t => /(^|\s)ohne(\s|$)/i.test(t)), key = ohne.join('|');
+     if (ohne.length && D.ohneOk !== key) { D.ohneOk = key; return 'Hinweis: „ohne …“ beachtet die Bildsuche kaum – „Kinder ohne Eltern“ findet fast dasselbe wie „Kinder“. Was nicht zu sehen sein soll, gehört besser in den nächsten Schritt. Wenn du es trotzdem so lassen willst, tippe noch einmal auf „Weiter“.'; }
+     return true; } },
+
+ { title: 'Was soll ausdrücklich nicht gefunden werden?',
+   why: '<b>Warum diese Frage?</b>Die Suche entscheidet für jedes Bild: Passt es besser zu deiner Beschreibung oder besser zu einer dieser „Gegenbeschreibungen“? So lassen sich ähnliche, aber unerwünschte Bilder aussortieren. Am meisten bringen Situationen, die deiner Suche <i>ähnlich sehen</i> – bei „Kinder spielen am Tisch“ zum Beispiel „Kinder beim Essen am Tisch“.<br><br>Beschreibe positiv, was dann zu sehen ist („Kinder spielen ein Kartenspiel“), nicht „keine Karten“. Und übertreib es nicht: Eine Gegenbeschreibung, die fast dasselbe meint wie deine Suche, verdrängt auch echte Treffer.',
+   body: () => '<div class="group">Vorschläge – antippen zum Übernehmen</div><div class="chips">'
+            + suggestNegatives().map(n => `<button class="chip${D.negatives.includes(n)?' on':''}" data-n="${esc(n)}" onclick="togNeg(this)">${esc(n)}</button>`).join('')
+            + `</div><div class="group">Deine Liste (eine Situation pro Zeile)</div><textarea id="f" rows="6" placeholder="z. B. Kinder spielen ein Kartenspiel">${esc(D.negatives.join('\n'))}</textarea>
+            <p class="ex">Du darfst die Liste auch leer lassen${D.kind === 'objekt' ? ' – dann nimmt die Suche allgemeine Standard-Gegenbeschreibungen (Landschaft, Essen, Gebäude …)' : ''}.</p>`,
+   save: () => { D.negatives = lines(document.getElementById('f').value); },
+   check: () => { const neg = D.negatives.filter(t => /(^|\s)(kein|keine|keinen|keiner|nicht)(\s|$)/i.test(t));
+     return !neg.length || 'Bitte beschreiben, was auf solchen Bildern zu sehen ist – statt „kein …“ oder „nicht …“:\n„' + neg.join('“, „') + '“'; } },
+
+ { title: 'Wie streng soll die Suche sein?',
+   why: '<b>Warum diese Frage?</b>Jede Suche muss zwischen zwei Fehlern abwägen: Bilder übersehen oder falsche Bilder zeigen. Beides ganz zu vermeiden geht nicht. Deine Wahl legt den Startwert fest – genau eingestellt wird er gleich anhand deiner Bewertung der Probebilder.',
+   body: () => opt('strict','vollstaendig','Lieber vollständig','Mir soll kein schönes Foto entgehen. Ein paar falsche sortiere ich gern selbst aus.')
+            + opt('strict','ausgewogen','Ausgewogen','Ein guter Mittelweg.')
+            + opt('strict','treffsicher','Lieber treffsicher','Was die Suche zeigt, soll stimmen. Dafür darf auch mal ein Bild fehlen.'),
+   save: () => {}, check: () => !!D.strict || 'Bitte wähle eine der drei Möglichkeiten.' },
+
+ { title: 'Wie soll die Suche heißen?',
+   why: '<b>Warum diese Frage?</b>Unter diesem Namen erscheint die Suche auf der Übersichtsseite, und so heißt später auch das vorgeschlagene Album in Synology Photos („Bildsuche: …“). Erlaubt sind Kleinbuchstaben, Ziffern und Unterstriche; der Name muss eindeutig sein.',
+   enter: () => { if (!D.nameTouched || !D.name) D.name = slug(D.motiv); },
+   body: () => `<input type="text" id="f" value="${esc(D.name)}"><p class="ex">Vorhandene Suchen: ${INFO.names.map(esc).join(', ') || '–'}</p>`,
+   save: () => { const v = slug(document.getElementById('f').value); if (v !== D.name) D.nameTouched = true; D.name = v; },
+   check: () => !INFO.names.includes(D.name) || 'Eine Suche mit diesem Namen gibt es schon – bitte einen anderen wählen.' },
+
+ { title: 'Probebilder bewerten',
+   why: '<b>Was passiert jetzt?</b>Die Bildsuche zeigt dir Bilder aus eurem Archiv, die sie mit deinen Angaben finden würde. Die ersten sind die wahrscheinlichsten, weiter hinten wird sie unsicherer – genau dort lernt sie am meisten. Tippe bei jedem Bild <b>✓ passt</b> oder <b>✗ passt nicht</b> an (mindestens 8, am besten alle). Bei „passt nicht“ hilft es sehr, wenn du kurz dazuschreibst, was stattdessen zu sehen ist – daraus wird eine Gegenbeschreibung. Antippen des Bildes vergrößert es.<br><br>Gespeichert wird die Suche nur, wenn die wahrscheinlichsten Bilder überwiegend passen. Sonst verbessern wir sie zusammen und probieren noch einmal.',
+   enter: () => loadProbe(), body: () => '<div id="probe"><p class="msg">Probesuche läuft …</p></div><div class="msg" id="pmsg"></div>',
+   save: () => {}, check: () => true, last: true },
+];
+
+function opt(field, val, label, sub){
+  const on = D[field] === val;
+  return `<label class="opt${on?' on':''}"><input type="radio" name="${field}" ${on?'checked':''} onchange="setF('${field}','${val}')"><span><b>${label}</b>${sub?`<small>${sub}</small>`:''}</span></label>`;
+}
+function setF(f, v){ D[f] = v; render(); }
+function togWer(k){ if (k === 'niemand') D.wer = D.wer.includes(k) ? [] : ['niemand'];
+  else { D.wer = D.wer.filter(x => x !== 'niemand'); D.wer = D.wer.includes(k) ? D.wer.filter(x => x !== k) : [...D.wer, k]; } render(); }
+function togNeg(b){ const cur = document.getElementById('f'); D.negatives = lines(cur.value); const n = b.dataset.n;
+  D.negatives = D.negatives.includes(n) ? D.negatives.filter(x => x !== n) : [...D.negatives, n]; render(); }
+
+function render(){
+  const S = STEPS[step];
+  document.getElementById('stepinfo').textContent = `Schritt ${step + 1} von ${STEPS.length}`;
+  document.getElementById('prog').style.width = (100 * (step + 1) / STEPS.length) + '%';
+  document.getElementById('card').innerHTML = `<h2>${S.title}</h2><div class="why">${S.why}</div>${S.body()}<div class="warn" id="warn"></div>
+    <div class="nav"><button class="s" onclick="back()" ${step ? '' : 'disabled'}>← Zurück</button>
+    ${S.last ? '<button class="p" id="savebtn" onclick="werteAus()" disabled>Auswerten und speichern</button>' : '<button class="p" onclick="next()">Weiter →</button>'}</div>`;
+  const f = document.getElementById('f'); if (f && !S.last) f.focus();
+}
+function go(n){ step = n; const S = STEPS[step]; if (S.enter) S.enter(); render(); window.scrollTo(0, 0); }
+function next(){ const S = STEPS[step]; S.save(); const c = S.check(); if (c !== true) { document.getElementById('warn').textContent = c; return; } go(step + 1); }
+function back(){ STEPS[step].save(); go(step - 1); }
+
+async function api(path, body){
+  const r = await fetch(path, {method: body ? 'POST' : 'GET', headers: {'Content-Type': 'application/json'}, body: body ? JSON.stringify(body) : undefined});
+  const j = await r.json(); if (!r.ok) throw new Error(j.message || ('Fehler ' + r.status)); return j;
+}
+async function loadProbe(){
+  PROBE = null; LABELS = {}; NOTES = {};
+  try { PROBE = await api('/api/assistent/probe', {draft: draft()}); }
+  catch (e) { document.getElementById('probe').innerHTML = `<p class="warn">${esc(e.message)}</p>`; return; }
+  document.getElementById('probe').innerHTML = '<div class="grid">' + PROBE.items.map(it => `
+    <div class="pc" id="pc${it.i}"><img loading="lazy" src="/api/assistent/bild?t=${PROBE.token}&i=${it.i}" alt="" onclick="zoom(${it.i})">
+    <div class="b"><button class="y" onclick="rate(${it.i},true)">✓ passt</button><button class="n" onclick="rate(${it.i},false)">✗ passt nicht</button></div>
+    <input type="text" placeholder="Was ist stattdessen zu sehen?" oninput="NOTES[${it.i}]=this.value">
+    <div class="r">Platz ${it.rank}</div></div>`).join('') + '</div>';
+  updSave();
+}
+function zoom(i){ const z = document.getElementById('zoom'); z.querySelector('img').src = `/api/assistent/bild?t=${PROBE.token}&i=${i}&gross=1`; z.classList.add('on'); }
+function rate(i, y){ LABELS[i] = y; const c = document.getElementById('pc' + i); c.classList.toggle('yes', y); c.classList.toggle('no', !y);
+  if (!y) setTimeout(() => c.querySelector('input').focus(), 50); updSave(); }
+function updSave(){ const n = Object.keys(LABELS).length, b = document.getElementById('savebtn');
+  if (b) { b.disabled = !PROBE || n < Math.min(8, PROBE.items.length); b.textContent = `Auswerten und speichern (${n}/${PROBE ? PROBE.items.length : 0} bewertet)`; } }
+async function werteAus(){
+  const m = document.getElementById('pmsg'); m.textContent = 'Werte aus …';
+  try {
+    const j = await api('/api/assistent/save', {draft: draft(), token: PROBE.token, labels: LABELS});
+    if (j.saved) {
+      document.getElementById('card').innerHTML = `<h2>✓ Gespeichert</h2><p class="msg">${esc(j.message)}</p>
+        <details><summary>Eintrag in der Konfiguration ansehen</summary><pre>${esc(j.yaml)}</pre></details>
+        <div class="nav"><a href="/"><button class="p">Zur Übersicht</button></a><button class="s" onclick="location.reload()">Noch eine Suche anlegen</button></div>`;
+      return;
+    }
+    const notes = Object.entries(NOTES).filter(([i, t]) => LABELS[i] === false && t.trim()).map(([, t]) => t.trim());
+    m.innerHTML = esc(j.message) + `<div class="nav"><button class="s" onclick="go(3)">Formulierungen ändern</button>
+      <button class="p" onclick="retry()">${notes.length ? 'Hinweise übernehmen und neu probieren' : 'Neu probieren'}</button></div>`;
+  } catch (e) { m.innerHTML = `<span class="warn">${esc(e.message)}</span>`; }
+}
+function retry(){
+  const notes = Object.entries(NOTES).filter(([i, t]) => LABELS[i] === false && t.trim()).map(([, t]) => t.trim());
+  notes.forEach(n => { if (!D.negatives.map(x => x.toLowerCase()).includes(n.toLowerCase())) D.negatives.push(n); });
+  go(STEPS.length - 1);
+}
+(async () => {
+  try { INFO = await api('/api/assistent/info'); } catch (e) {}
+  if (!INFO.ready) document.getElementById('stepinfo').textContent = 'Hinweis: Die Bildsuche lädt gerade ihren Index – die Probebilder am Ende gehen erst danach.';
+  go(0);
+})();
+</script></body></html>"""
 
 
 CONFIG_PAGE = """<!doctype html><html lang="de"><head><meta charset="utf-8">
@@ -1864,6 +2322,28 @@ def start_web():
             path = urllib.parse.urlparse(self.path).path
             if path == "/bild":
                 return self._send_image()
+            if path == "/assistent":
+                return self._send_bytes(ASSIST_PAGE, "text/html; charset=utf-8")
+            if path == "/api/assistent/info":
+                eng = ENGINE[0]
+                try:
+                    settings, searches = load_config()
+                except Exception:
+                    settings, searches = DEFAULTS, []
+                return self._json(200, {"ready": bool(eng is not None and eng.store.has_g.any()),
+                                        "names": [q["name"] for q in searches],
+                                        "default_negatives": list(settings.get("default_negatives") or [])})
+            if path == "/api/assistent/bild":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                with PROBE_LOCK:
+                    probe = PROBES.get((qs.get("t") or [""])[0])
+                try:
+                    it = probe["items"][int((qs.get("i") or ["-1"])[0])]
+                    fn = assist_thumb(it["path"], big=(qs.get("gross") or ["0"])[0] == "1")
+                    with open(fn, "rb") as fh:
+                        return self._send_bytes(fh.read(), "image/jpeg")
+                except Exception:
+                    return self._json(404, {"message": "Bild nicht verfügbar."})
             if path == "/protokoll":
                 return self._send_bytes(protokoll_page(self.path), "text/html; charset=utf-8")
             if path == "/protokoll.txt":
@@ -1911,6 +2391,33 @@ def start_web():
                 log.info("Konfiguration über die Webseite gespeichert.")
                 return self._json(200, {"ok": True, "message": "Gespeichert. " + m +
                                         " Die Reports werden in ca. 30 Sekunden neu erstellt."})
+            if self.path.startswith("/api/assistent/"):
+                try:
+                    ln = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(ln).decode("utf-8")) if 0 < ln < 1_000_000 else {}
+                except Exception:
+                    return self._json(400, {"message": "Ungültige Anfrage."})
+                draft = body.get("draft") or {}
+                try:
+                    if self.path.startswith("/api/assistent/probe"):
+                        return self._json(200, assist_probe(draft))
+                    if self.path.startswith("/api/assistent/save"):
+                        ok, msg, q, rate = assist_evaluate(draft, body.get("token"), body.get("labels") or {})
+                        if not ok:
+                            return self._json(200, {"saved": False, "message": msg})
+                        block = config_add_search(q, draft.get("motiv") or q["name"])
+                        return self._json(200, {
+                            "saved": True, "name": q["name"], "yaml": block,
+                            "message": msg + f" Die Suche „{q['name']}“ ist gespeichert (Schwelle {q['threshold']:.2f}, "
+                                             f"Grob-Schwelle {q['coarse_threshold']:.2f}). In etwa einer Minute erscheint "
+                                             f"sie auf der Übersicht; die Treffer werden in den nächsten Stunden nach und "
+                                             f"nach geprüft."})
+                except (ValueError, RuntimeError) as e:
+                    return self._json(400, {"message": str(e)})
+                except Exception as e:
+                    log.error("Assistent fehlgeschlagen", exc_info=True)
+                    return self._json(500, {"message": f"Unerwarteter Fehler: {e}"})
+                return self._json(404, {"message": "unbekannt"})
             if self.path.startswith("/api/report/delete"):
                 name, _ = self._search_param()
                 if not name:
@@ -1925,6 +2432,11 @@ def start_web():
                         return self._json(400, {"message": "Ungültiger Name."})
                     shutil.rmtree(target)
                     log.info("Alter Report '%s' über die Webseite gelöscht.", name)
+                    if LAST_INDEX[0]:
+                        try:
+                            write_index(*LAST_INDEX[0])      # Übersicht sofort ohne den gelöschten Report
+                        except Exception as e:
+                            log.warning("Übersicht konnte nicht sofort aktualisiert werden: %s", e)
                     return self._json(200, {"message": f"Report „{name}“ gelöscht."})
                 except Exception as e:
                     return self._json(500, {"message": f"Löschen fehlgeschlagen: {e}"})
@@ -2026,6 +2538,7 @@ def main():
         rerank_key = f"{settings['rerank_model']} {settings['rerank_pretrained']}"
         store = Store(found, db, base.dim, rerank_key)
         eng = Engine(base, db, store, settings, searches)
+        ENGINE[0] = eng
         eng.strong = strong if (strong and strong.key == rerank_key) else None
         eng.progress(force=True)
         next_scan = time.time() + float(settings["rescan_interval_hours"]) * 3600

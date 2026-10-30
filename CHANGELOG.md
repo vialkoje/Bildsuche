@@ -5,6 +5,9 @@ und auf jeder Report-Seite.
 
 | Version | Änderungen |
 |---|---|
+| 2026-10-30c | Übersicht wird nach dem Löschen eines älteren Reports sofort neu geschrieben |
+| 2026-10-30b | Assistent: „ohne“ wird bei Gegenbeschreibungen nicht mehr als Verneinung abgelehnt (bei Formulierungen nur noch Hinweis); Vorschläge, die dem Gesuchten selbst entsprechen, werden ausgeblendet |
+| 2026-10-30a | **Assistent „Neue Suche anlegen“** (Übersicht → Knopf): 8 Fragen mit Erklärungen, Vorschläge für Formulierungen und Gegenbeschreibungen, Prüfung auf Verneinungen, Probesuche mit 16 Bildern zum Bewerten, Kalibrierung der Schwellen, Speichern nur bei überwiegend passenden Probebildern; Eintrag in die Konfiguration mit Sicherung und Prüfung |
 | 2026-10-21e | Bildansicht über dem Report statt neuem Tab (Blättern, Auswählen, Zurück-Geste; funktioniert in der iPad-Web-App) |
 | 2026-10-21d | Fix: Absturz der Protokollierung bei kaputten Anfragen (z. B. HTTPS auf dem HTTP-Port); 400/404 werden nicht mehr gemeldet |
 | 2026-10-21c | Webserver-Fehler und Fehler in Hintergrund-Threads landen im Protokoll |
