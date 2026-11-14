@@ -32,7 +32,7 @@ Eine Datei: `app/bildsuche.py` (~3.800 Zeilen). Wichtige Teile in Reihenfolge:
 | `index_file`, `DB`, `list_indexes`, `migrate_legacy_index` | SQLite-Index **pro Bildpfad**, relative Pfade, float16 |
 | `scan`, `Store` | Dateiscan, RAM-Arrays G (Gesamtbild), T (Kacheln), R (Prüfung) |
 | `Engine` | Arbeitsschleife: Stufe 1 → Prüfung → Kacheln, adaptive Kandidatenmenge (`pool_size`), Reports |
-| `write_report`, `write_index`, `album_box`, `LIGHTBOX` | HTML/CSV der Reports, Übersichtsseite, Album-UI, Bildansicht |
+| `write_report`, `write_index`, `INDEX_CSS`/`INDEX_JS`, `album_box`, `LIGHTBOX` | HTML/CSV der Reports, Übersichtsseite (CSS/JS als normale Strings, keine `{{ }}`), Album-UI, Bildansicht |
 | `PhotosClient`, `album_job` | inoffizielle Synology-Photos-API (Login `session=webui`), Album anlegen/ergänzen/teilen/löschen |
 | `assist_*`, `config_add_search`, `ASSIST_PAGE` | Assistent „Neue Suche anlegen“: Probesuche, Kalibrierung, Eintrag in die Konfiguration |
 | `themen_*`, `THEMEN_TAXONOMIE`, `THEMEN_HTML` | Themen „Bilder nach Themen erkunden“: hierarchisches k-Means, Benennung aus der Begriffsliste, Querverweise, Suchvorschlag, Hintergrund-Job (`themen_job`, `THEMEN_STATE`), Baum in `data/themen/` |

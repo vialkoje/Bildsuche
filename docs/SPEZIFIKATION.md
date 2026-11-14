@@ -1,6 +1,6 @@
 # Spezifikation
 
-Stand: Version 2026-11-14a
+Stand: Version 2026-11-14b
 
 ## Zweck
 
@@ -146,7 +146,7 @@ Port 8091, ohne Passwort. Abschalten: `WEB_PORT=0` in `compose.yaml`.
 
 | Seite / Endpunkt | Inhalt |
 |---|---|
-| `/` | Übersicht: Bildpfad, Fortschritt, Suchen, Indizes, ältere Reports mit Löschknopf |
+| `/` | Übersicht: Kacheln für Assistent und Themen, Suchen als Karten (bestätigt/vorläufig), Fortschritt der drei Stufen, Indizes und ältere Reports (aufklappbar, mit Löschknopf); auf dem Handy einspaltig, hell/dunkel nach Systemeinstellung |
 | `/<suche>/report.html` | Treffer als Vorschaubilder, Album-Kasten, Auswahl per Klick / Umschalt-Klick |
 | `/<suche>/results.csv` | alle Treffer (Semikolon, deutsches Komma) |
 | `/bild?s=&p=` | Originalbild, HEIC/RAW als JPEG; nur Bilder aus dem Report dieser Suche |

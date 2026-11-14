@@ -69,7 +69,7 @@ try:
 except Exception:  # pragma: no cover
     rawpy = None
 
-VERSION = "2026-11-14a"
+VERSION = "2026-11-14b"
 CONFIG_PATH = os.environ.get("CONFIG", "/config/searches.yaml")
 REPORT_DIR = os.environ.get("REPORTS", "/reports")
 THREADS = int(os.environ.get("THREADS", "2"))
@@ -1149,18 +1149,139 @@ def write_status(counts, summary, final):
 LAST_INDEX = [None]      # letzte Daten der Übersicht – damit sie nach dem Löschen sofort neu geschrieben werden kann
 
 
+INDEX_CSS = """
+:root{--bg:#f4f4f1;--card:#fff;--ink:#1d1d1f;--mute:#6e6e73;--line:#e3e3e0;--acc:#2a6fdb;--acc2:#1f5bbd;
+  --ok:#1e8e3e;--okbg:#e6f4ea;--warn:#b26a00;--warnbg:#fff4e0;--bad:#c0392b;--tint:#eef3fb;--track:#e6e6e2}
+@media (prefers-color-scheme:dark){:root{--bg:#161618;--card:#242426;--ink:#f2f2f2;--mute:#9a9a9f;--line:#38383b;
+  --acc:#4c8dff;--acc2:#6aa0ff;--ok:#5cc27a;--okbg:#1f3326;--warn:#f0b04a;--warnbg:#3a2e17;--bad:#ff6b5e;--tint:#1f2a40;--track:#38383b}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{font-family:-apple-system,system-ui,"Segoe UI",sans-serif;margin:0;background:var(--bg);color:var(--ink);line-height:1.45}
+main{max-width:980px;margin:0 auto;padding:max(20px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right))
+  max(32px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+a{color:var(--acc);text-decoration:none}
+header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+h1{margin:0;font-size:30px;letter-spacing:-.02em}
+.state{display:inline-flex;align-items:center;gap:8px;font-size:14px;color:var(--mute);margin-top:4px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:none}
+.dot.run{background:var(--acc);animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+nav.links{display:flex;gap:8px;flex-wrap:wrap}
+nav.links a{display:inline-flex;align-items:center;gap:6px;min-height:40px;padding:8px 14px;border-radius:999px;
+  background:var(--card);border:1px solid var(--line);color:var(--ink);font-size:14px}
+nav.links a:hover{border-color:var(--acc)}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:22px}
+.action{display:flex;gap:14px;align-items:center;padding:18px;border-radius:16px;min-height:84px;
+  background:var(--card);border:1px solid var(--line);color:var(--ink);transition:transform .08s,border-color .15s}
+.action:hover{border-color:var(--acc)} .action:active{transform:scale(.98)}
+.action.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+.action.pri:hover{background:var(--acc2)}
+.action .ic{font-size:26px;width:46px;height:46px;border-radius:12px;display:grid;place-items:center;flex:none;background:var(--tint)}
+.action.pri .ic{background:rgba(255,255,255,.18)}
+.action b{display:block;font-size:17px} .action small{display:block;font-size:13px;opacity:.75;margin-top:2px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);font-weight:600;margin:26px 4px 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px 18px}
+.stages{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.stage .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px}
+.stage .lbl{font-size:14px;font-weight:500}
+.stage .pc{font-size:20px;font-weight:650;font-variant-numeric:tabular-nums}
+.stage .cnt{font-size:12px;color:var(--mute);margin-top:5px;font-variant-numeric:tabular-nums}
+.bar{height:8px;background:var(--track);border-radius:4px;overflow:hidden}
+.bar>div{height:100%;background:var(--acc);border-radius:4px}
+.bar.done>div{background:var(--ok)}
+.path{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:13px;color:var(--mute);word-break:break-all}
+.path b{color:var(--ink);font-weight:500}
+.searches{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px}
+.search{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;row-gap:8px;align-items:center;
+  padding:14px 16px;min-width:0;border-radius:14px;background:var(--card);border:1px solid var(--line);color:var(--ink)}
+.search:hover{border-color:var(--acc)} .search:active{transform:scale(.99)}
+.search .nm{min-width:0;font-weight:600;font-size:16px;overflow-wrap:anywhere}
+.search .nm small{display:block;font-weight:400;font-size:12px;color:var(--mute);margin-top:1px}
+.search .pills{grid-column:1;display:flex;gap:6px;flex-wrap:wrap}
+.search .chev{grid-column:2;grid-row:1/3}
+.pill{font-size:13px;font-variant-numeric:tabular-nums;padding:3px 9px;border-radius:999px;white-space:nowrap}
+.pill.ok{background:var(--okbg);color:var(--ok)} .pill.pre{background:var(--warnbg);color:var(--warn)}
+.pill.zero{background:var(--track);color:var(--mute)}
+.chev{color:var(--mute);font-size:20px;flex:none}
+.empty{color:var(--mute);font-size:14px}
+details.card{padding:0;margin-top:10px}
+details.card>summary{list-style:none;cursor:pointer;padding:14px 18px;min-height:52px;display:flex;align-items:center;gap:10px;font-weight:600}
+details.card>summary::-webkit-details-marker{display:none}
+details.card>summary::after{content:"›";display:inline-block;margin-left:auto;color:var(--mute);font-size:20px;transition:transform .15s}
+details.card[open]>summary::after{transform:rotate(90deg)}
+details.card>summary .cnt{font-weight:400;color:var(--mute);font-size:14px}
+.dbody{padding:0 18px 14px}
+.dbody p{font-size:13px;color:var(--mute);margin:0 0 10px}
+.row{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line);font-size:14px}
+.row .grow{flex:1;min-width:0;word-break:break-word}
+.row .sub{display:block;font-size:12px;color:var(--mute)}
+.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+.tag{display:inline-block;white-space:nowrap;font-size:11px;font-weight:600;color:var(--acc);background:var(--tint);padding:2px 7px;border-radius:999px;margin-left:6px}
+button.del{font:inherit;font-size:13px;min-height:36px;padding:6px 12px;border-radius:8px;border:1px solid var(--bad);
+  background:transparent;color:var(--bad);cursor:pointer;flex:none}
+button.del:disabled{opacity:.5}
+#oldmsg{font-size:13px;color:var(--mute);margin:8px 0 0}
+footer{margin-top:28px;text-align:center;font-size:12px;color:var(--mute)}
+@media (max-width:640px){
+  h1{font-size:26px}
+  header{align-items:flex-start}
+  nav.links{width:100%} nav.links a{flex:1;justify-content:center}
+  .actions{grid-template-columns:1fr;gap:10px}
+  .action{min-height:72px;padding:14px 16px}
+  .stages{grid-template-columns:1fr;gap:16px}
+  .searches{grid-template-columns:minmax(0,1fr)}
+}
+"""
+
+INDEX_JS = r"""
+async function delReport(b){
+  const name = b.dataset.name, msg = document.getElementById('oldmsg');
+  if (location.protocol === 'file:') { msg.textContent = 'Das geht nur über die Webseite.'; return; }
+  if (!confirm('Alten Report „' + name + '“ löschen?\n\nEntfernt wird nur der Report-Ordner, nicht der Index und keine Bilder.')) return;
+  b.disabled = true;
+  try {
+    const r = await fetch('/api/report/delete?search=' + encodeURIComponent(name), {method: 'POST'});
+    const j = await r.json(); msg.textContent = j.message;
+    if (r.ok) { const row = document.getElementById('old-' + name); if (row) row.remove(); } else b.disabled = false;
+  } catch (e) { msg.textContent = 'Fehler: ' + e; b.disabled = false; }
+}
+"""
+
+
 def write_index(counts, summary, final):
-    """Übersichtsseite reports/index.html – im Browser über die Webseite oder als Datei."""
+    """Übersichtsseite reports/index.html – im Browser über die Webseite oder als Datei.
+    Karten-Layout, auf dem Handy einspaltig; Farben wie Assistent und Themen (hell/dunkel)."""
     LAST_INDEX[0] = (counts, summary, final)
     n, g, t, c, r = counts
+    esc = html.escape
+    num = lambda x: f"{x:,}".replace(",", ".")  # noqa: E731
     pct = lambda a, b: f"{100 * a / b:.0f} %" if b else "–"  # noqa: E731
-    pw = lambda a, b: f"{100 * a / b:.1f}%" if b else "0%"  # noqa: E731
+    pw = lambda a, b: f"{min(100, 100 * a / b):.1f}%" if b else "0%"  # noqa: E731
+
+    def stage(label, a, b, unit):
+        done = " done" if b and a >= b else ""
+        return (f'<div class="stage"><div class="top"><span class="lbl">{label}</span><span class="pc">{pct(a, b)}</span></div>'
+                f'<div class="bar{done}"><div style="width:{pw(a, b)}"></div></div>'
+                f'<div class="cnt">{num(a)} von {num(b)} {unit}</div></div>')
+
+    def pretty(name):                          # lego_modell -> Lego modell
+        t = re.sub(r"[_\s]+", " ", name).strip()
+        return t[:1].upper() + t[1:]
+
+    def pill(k, cls, word):
+        return f'<span class="pill {cls if k else "zero"}">{num(k)} {word}</span>'
+
+    cards = "".join(
+        f'<a class="search" href="{urllib.parse.quote(name)}/report.html">'
+        f'<span class="nm">{esc(pretty(name))}<small>{esc(name)}</small></span><span class="chev">›</span>'
+        f'<span class="pills">{pill(a, "ok", "bestätigt")}{pill(b, "pre", "vorläufig") if b else ""}</span></a>'
+        for name, a, b in summary) or '<p class="empty">Noch keine Suchen – lege mit dem Assistenten die erste an.</p>'
+
+    indexes = list_indexes()
     idx_rows = "".join(
-        f'<tr><td>{html.escape(r)}{" <b>(aktiv)</b>" if r == CURRENT_ROOT[0] else ""}</td>'
-        f'<td class="num">{n}</td></tr>' for r, n, _ in list_indexes()) or '<tr><td colspan="2">–</td></tr>'
-    rows = "".join(
-        f'<tr><td><a href="{urllib.parse.quote(name)}/report.html">{html.escape(name)}</a></td>'
-        f'<td class="num">{a}</td><td class="num">{b}</td></tr>' for name, a, b in summary)
+        f'<div class="row"><span class="grow">{esc(p)}{"<span class=tag>aktiv</span>" if p == CURRENT_ROOT[0] else ""}</span>'
+        f'<span class="num">{num(k)} Bilder</span></div>' for p, k, _ in indexes) or '<div class="row">–</div>'
+
     active = {name for name, _, _ in summary}
     orphans = []
     try:
@@ -1177,64 +1298,54 @@ def write_index(counts, summary, final):
     except OSError:
         pass
     old_rows = "".join(
-        f'<tr id="old-{html.escape(d, quote=True)}"><td><a href="{urllib.parse.quote(d)}/report.html">{html.escape(d)}</a></td>'
-        f'<td>{ts:%d.%m.%Y %H:%M}</td><td class="num">{k}</td>'
-        f'<td class="num"><button class="del" data-name="{html.escape(d, quote=True)}" onclick="delReport(this)">Löschen</button></td></tr>'
+        f'<div class="row" id="old-{esc(d, quote=True)}"><span class="grow"><a href="{urllib.parse.quote(d)}/report.html">{esc(d)}</a>'
+        f'<span class="sub">Stand {ts:%d.%m.%Y %H:%M} · {num(k)} bestätigt</span></span>'
+        f'<button class="del" data-name="{esc(d, quote=True)}" onclick="delReport(this)">Löschen</button></div>'
         for d, ts, k in orphans)
-    old_block = (f"""<h2 style="font-size:16px;margin-top:28px">Ältere Reports</h2>
-<p class="meta">Reports von Suchen, die es in der Konfiguration nicht mehr gibt (z. B. nach dem Umbenennen).
+    old_block = (f"""<details class="card"><summary>Ältere Reports <span class="cnt">{len(orphans)}</span></summary>
+<div class="dbody"><p>Reports von Suchen, die es in der Konfiguration nicht mehr gibt (z. B. nach dem Umbenennen).
 Sie werden nicht mehr aktualisiert. „Löschen“ entfernt nur den Report-Ordner – Index und Bilder bleiben unberührt.</p>
-<table><tr><th>Report</th><th>Stand</th><th class="num">bestätigt</th><th></th></tr>{old_rows}</table>
-<p class="meta" id="oldmsg"></p>""" if orphans else "")
-    state = ("fertig – wartet auf neue Bilder" if final
+{old_rows}<p id="oldmsg"></p></div></details>""" if orphans else "")
+
+    state = ("Fertig – wartet auf neue Bilder" if final
              else "Berechnung läuft – die Reports werden laufend besser")
     page = f"""<!doctype html><html lang="de"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f4f4f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161618" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Bildsuche">
 <meta http-equiv="refresh" content="300">
 <title>Bildsuche</title>
-<style>
-body{{font-family:-apple-system,system-ui,sans-serif;margin:24px;background:#f6f6f4;color:#222;max-width:900px}}
-@media (prefers-color-scheme:dark){{body{{background:#1c1c1e;color:#eee}}table{{background:#2c2c2e!important}}td,th{{border-color:#444!important}}}}
-h1{{margin:0 0 6px}} .meta{{color:#888;font-size:14px;line-height:1.6}}
-table{{border-collapse:collapse;width:100%;margin-top:18px;background:#fff;border-radius:8px;overflow:hidden}}
-th,td{{padding:10px 12px;border-bottom:1px solid #e5e5e5;text-align:left}} th{{font-size:13px;color:#888;font-weight:600}}
-td.num,th.num{{text-align:right;font-variant-numeric:tabular-nums}}
-a{{color:#2a6fdb;text-decoration:none}} a:hover{{text-decoration:underline}}
-.bar{{height:6px;background:#ddd;border-radius:3px;overflow:hidden;margin:2px 0 8px;max-width:420px}}
-.bar>div{{height:100%;background:#2a6fdb}}
-a.newbtn{{display:inline-block;padding:10px 16px;border-radius:8px;background:#2a6fdb;color:#fff;font-weight:600}}
-a.newbtn:hover{{text-decoration:none;background:#1f5bbd}}
-a.newbtn.alt{{background:transparent;color:#2a6fdb;border:1px solid #2a6fdb;margin-left:6px}}
-a.newbtn.alt:hover{{background:rgba(42,111,219,.1)}}
-button.del{{font:inherit;font-size:13px;padding:4px 10px;border-radius:6px;border:1px solid #c0392b;background:transparent;color:#c0392b;cursor:pointer}}
-</style></head><body>
-<h1>Bildsuche</h1>
-<p><a class="newbtn" href="/assistent">＋ Neue Suche anlegen</a> <a class="newbtn alt" href="/themen">▦ Bilder nach Themen erkunden</a></p>
-<p><a href="/themen">▦ Themen</a> · <a href="/config">⚙︎ Konfiguration ansehen &amp; bearbeiten</a> · <a href="/protokoll">☰ Protokoll</a></p>
-<div class="meta">Bildpfad: <b>{html.escape(CURRENT_ROOT[0])}</b> · Stand {datetime.now():%d.%m.%Y %H:%M} · {state}<br>
-Stufe 1 Gesamtbild: {g} / {n} ({pct(g, n)})<div class="bar"><div style="width:{pw(g, n)}"></div></div>
-Stufe 2 Kacheln: {t} / {n} ({pct(t, n)})<div class="bar"><div style="width:{pw(t, n)}"></div></div>
-Stufe 3 Geprüft: {r} / {c} Kandidaten ({pct(r, c)})<div class="bar"><div style="width:{pw(r, c)}"></div></div>
+<style>{INDEX_CSS}</style></head><body><main>
+<header>
+  <div><h1>Bildsuche</h1>
+  <div class="state"><span class="dot{"" if final else " run"}"></span>{state} · {datetime.now():%d.%m.%Y %H:%M}</div></div>
+  <nav class="links"><a href="/config">⚙︎ Konfiguration</a><a href="/protokoll">☰ Protokoll</a></nav>
+</header>
+<div class="actions">
+  <a class="action pri" href="/assistent"><span class="ic">＋</span><span><b>Neue Suche anlegen</b><small>Schritt für Schritt mit Probebildern</small></span></a>
+  <a class="action" href="/themen"><span class="ic">🗂️</span><span><b>Bilder nach Themen erkunden</b><small>Das Archiv nach Gruppen durchstöbern</small></span></a>
 </div>
-<table><tr><th>Suche</th><th class="num">bestätigt</th><th class="num">vorläufig</th></tr>{rows}</table>
-<h2 style="font-size:16px;margin-top:28px">Vorhandene Indizes</h2>
-<p class="meta">Pro Bildpfad wird ein eigener Index geführt. Wechselst du in der Konfiguration <code>photo_root</code>,
+<h2>Suchen</h2>
+<div class="searches">{cards}</div>
+<h2>Fortschritt</h2>
+<div class="card">
+  <div class="stages">
+    {stage("Stufe 1 · Gesamtbild", g, n, "Bilder")}
+    {stage("Stufe 2 · Kacheln", t, n, "Bilder")}
+    {stage("Stufe 3 · Prüfung", r, c, "Kandidaten")}
+  </div>
+  <div class="path">Bildpfad: <b>{esc(CURRENT_ROOT[0])}</b></div>
+</div>
+<details class="card" style="margin-top:22px"><summary>Vorhandene Indizes <span class="cnt">{len(indexes)}</span></summary>
+<div class="dbody"><p>Pro Bildpfad wird ein eigener Index geführt. Wechselst du in der Konfiguration <code>photo_root</code>,
 wird für neue Pfade ein weiterer Index angelegt; beim Zurückwechseln wird der vorhandene weiterbenutzt.</p>
-<table><tr><th>Bildpfad</th><th class="num">berechnete Bilder</th></tr>{idx_rows}</table>
+{idx_rows}</div></details>
 {old_block}
-<script>
-async function delReport(b){{
-  const name = b.dataset.name, msg = document.getElementById('oldmsg');
-  if (location.protocol === 'file:') {{ msg.textContent = 'Das geht nur über die Webseite.'; return; }}
-  if (!confirm('Alten Report „' + name + '“ löschen?\\n\\nEntfernt wird nur der Report-Ordner, nicht der Index und keine Bilder.')) return;
-  b.disabled = true;
-  try {{
-    const r = await fetch('/api/report/delete?search=' + encodeURIComponent(name), {{method: 'POST'}});
-    const j = await r.json(); msg.textContent = j.message;
-    if (r.ok) {{ const row = document.getElementById('old-' + name); if (row) row.remove(); }} else b.disabled = false;
-  }} catch (e) {{ msg.textContent = 'Fehler: ' + e; b.disabled = false; }}
-}}
-</script>
+<footer>Version {VERSION} · aktualisiert sich alle 5 Minuten</footer>
+</main>
+<script>{INDEX_JS}</script>
 </body></html>"""
     write_atomic(os.path.join(REPORT_DIR, "index.html"), page)
 
