@@ -53,7 +53,8 @@ step("Konfig-Vorlage laden", cfg)
 
 def scripts():
     pages = {"album_box": b.album_box("test"), "LIGHTBOX": b.LIGHTBOX, "CONFIG_PAGE": b.CONFIG_PAGE,
-             "protokoll": b.protokoll_page("/protokoll"), "ASSIST_PAGE": b.ASSIST_PAGE}
+             "protokoll": b.protokoll_page("/protokoll"), "ASSIST_PAGE": b.ASSIST_PAGE,
+             "THEMEN_HTML": b.THEMEN_HTML}
     b.CURRENT_ROOT[0] = "/volume1/photo"
     b.write_index((10, 10, 1, 5, 2), [("test", 2, 0)], False)
     with open(os.path.join(os.environ["REPORTS"], "index.html"), encoding="utf-8") as f:

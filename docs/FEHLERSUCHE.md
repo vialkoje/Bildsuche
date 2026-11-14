@@ -10,6 +10,7 @@ Stolpersteine, die beim Aufbau tatsächlich aufgetreten sind, mit Ursache und L�
 | `invalid trailing UTF-8 octet` beim Erstellen | `compose.yaml` mit dem Synology-Texteditor bearbeitet | Datei nur am Rechner bearbeiten, nur ASCII-Zeichen verwenden |
 | „Container nicht vorhanden“ beim Stoppen, Projekt hängt | Projekt wurde neu erstellt, während der alte Container lief | Container Manager neu starten, Projekt stoppen, erneut erstellen |
 | Änderung an `compose.yaml` wirkt nicht | Neustart reicht dafür nicht | Projekt stoppen → erstellen |
+| Container startet alle paar Stunden neu, im Protokoll „Zu wenig Arbeitsspeicher“ | beim Neu-Scan lag der alte Index kurz doppelt im RAM (OOM bei `mem_limit`) | behoben in 2026-11-13c (alter Index wird vorher freigegeben); sonst `mem_limit` erhöhen |
 | Neue Programmversion läuft nicht | alte `bildsuche.py` noch in `app/` oder Datei heißt z. B. `bildsuche (1).py` | Datei exakt als `app/bildsuche.py` ersetzen, Version im Protokoll prüfen |
 
 ## Webseite
@@ -19,6 +20,9 @@ Stolpersteine, die beim Aufbau tatsächlich aufgetreten sind, mit Ursache und L�
 | 404 direkt nach dem Start | noch kein Report geschrieben | wenige Minuten warten (die Übersicht entsteht beim Start) |
 | Album-Knöpfe funktionieren nicht | Report als Datei (Finder/SMB) statt über die Webseite geöffnet | über `http://<NAS>:8091/` öffnen |
 | iPad: nach „Bild öffnen“ kein Zurück | Seite als Web-App auf dem Home-Bildschirm, alte Version öffnete einen neuen Tab | ab 2026-10-21e erscheint das Bild über dem Report; sonst Web-App schließen und neu öffnen |
+| Themen: „Die Themen sind noch nicht berechnet“ | Stufe 1 ist noch nicht zu 98 % fertig | abwarten – die Berechnung startet danach von selbst; oder „Jetzt berechnen“ |
+| Themen: Berechnung hängt bei „Begriffe vorbereiten“ | ältere Version rechnete mit gesenkter Priorität und bekam kaum CPU | ab 2026-11-12a behoben |
+| Themen: Vorschaubilder erscheinen langsam | bei der ersten Anzeige tieferer Ebenen werden sie erst erzeugt (höchstens 2 gleichzeitig) | kein Fehler; danach aus dem Zwischenspeicher |
 | „Vorläufig“ ist überall 0 | alle Bilder über der Grob-Schwelle sind bereits geprüft | kein Fehler |
 
 ## Synology Photos / Alben

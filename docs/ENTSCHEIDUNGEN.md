@@ -5,6 +5,7 @@ versehentlich rückgängig gemacht werden. Neueste oben.
 
 | Nr. | Entscheidung | Begründung / Kontext |
 |---|---|---|
+| E18 | Themen-Berechnung läuft **ohne** gesenkte Thread-Priorität | Die Bildsuche rechnet ständig; ein gebremster Thread bekam kaum CPU („Begriffe vorbereiten“ hing über 10 Minuten, 2026-11-12a) |
 | E17 | **Kein Zugriff aus dem Internet**; Zugriff von unterwegs nur per VPN (Tailscale oder DSM-VPN) | Familienfotoarchiv; selbstgebauter Webserver ohne Login. Konzept für DSM-Login (Login gegen `SYNO.API.Auth`, Allowlist, 2FA-Feld, eigene Sperre gegen Passwort-Raten, Reverse Proxy mit HTTPS) liegt vor, wird nur auf ausdrücklichen Wunsch gebaut |
 | E16 | Bildansicht als Overlay im Report statt neuem Tab | iPad-Web-App (Home-Bildschirm) hat keine Tabs/Zurück |
 | E15 | Protokoll zusätzlich als Datei, Anzeige im Browser; **kein** Zugriff auf Docker-Socket | Docker-Socket im Container wäre ein Sicherheitsrisiko |

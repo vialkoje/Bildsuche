@@ -13,6 +13,7 @@ Neustart dort weiter, wo sie war. Reports werden laufend aktualisiert:
 Suchbegriffe kosten keine Neuberechnung – die Bilder sind schon "angeschaut".
 """
 import csv
+import gc
 import hashlib
 import html
 import io
@@ -68,7 +69,7 @@ try:
 except Exception:  # pragma: no cover
     rawpy = None
 
-VERSION = "2026-10-30c"
+VERSION = "2026-11-13c"
 CONFIG_PATH = os.environ.get("CONFIG", "/config/searches.yaml")
 REPORT_DIR = os.environ.get("REPORTS", "/reports")
 THREADS = int(os.environ.get("THREADS", "2"))
@@ -546,7 +547,7 @@ class Store:
         self.T = np.zeros((n, 4, dim), np.float16)
         self.has_t = np.zeros(n, bool)
         self.err_t = np.zeros(n, bool)
-        self.R = {}            # i -> (5, dim_r) float32
+        self.R = {}            # i -> (5, dim_r) float16 (wie in der Datenbank; halber Speicher gegenüber float32)
         self.err_r = set()
         t0 = time.time()
         for p, e, err in db.rows("SELECT path, emb, error FROM images"):
@@ -572,8 +573,7 @@ class Store:
             if i is None or model != rerank_key:
                 continue
             if e is not None:
-                v = np.frombuffer(e, np.float16).astype(np.float32)
-                self.R[i] = v.reshape(5, -1)
+                self.R[i] = np.frombuffer(e, np.float16).reshape(5, -1)
             elif err:
                 self.err_r.add(i)
         log.info("Index geladen: %d Gesamtbild, %d Kacheln, %d geprüft (%.0fs).",
@@ -632,10 +632,15 @@ class Engine:
                 self.strong = Model(self.settings["rerank_model"], self.settings["rerank_pretrained"])
             Ts = self.strong.text_matrix(q)
             ids = list(s.R)
-            p = pos_prob(np.stack([s.R[i] for i in ids]), Ts, self.strong.logit_scale)  # (k, 5)
-            for i, row in zip(ids, p):
-                final_s[i] = float(row.max())
-                final_crop[i] = int(row.argmax())
+            chunk = 20000                       # stückweise statt ganz R auf einmal als float32 zu kopieren
+            for a in range(0, len(ids), chunk):
+                part = ids[a:a + chunk]
+                E = np.stack([s.R[i] for i in part]).astype(np.float32)
+                p = pos_prob(E, Ts, self.strong.logit_scale)  # (k, 5)
+                del E
+                for i, row in zip(part, p):
+                    final_s[i] = float(row.max())
+                    final_crop[i] = int(row.argmax())
         return final_s, final_crop
 
     def pool_size(self, q, order, score):
@@ -766,7 +771,7 @@ class Engine:
                 crops = [c for _, im in good for c in [padded(im)] + quadrants(im)]
                 embs = self.strong.embed_images(crops, bs=5).reshape(len(good), 5, -1)
                 for (i, _), e in zip(good, embs):
-                    s.R[i] = e
+                    s.R[i] = e.astype(np.float16)
                     rows.append((s.paths[i], key, e.astype(np.float16).tobytes(), None))
             for i, err in bad:
                 s.err_r.add(i)
@@ -1039,29 +1044,38 @@ LIGHTBOX = r"""<div id="lb" hidden>
 <div id="lbwrap"><div id="lbload">Bild wird geladen …</div><img id="lbimg" alt=""></div>
 <button id="lbnx" class="lbnav" aria-label="Nächstes Bild">›</button>
 <div id="lbcap"></div>
+<div id="lbextra" hidden></div>
 </div>
 <style>
 #lb{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.92);color:#eee;display:flex;align-items:center;justify-content:center}
 #lb[hidden]{display:none}
 #lbbar{position:absolute;top:0;left:0;right:0;display:flex;gap:10px;align-items:center;padding:10px 12px;
   padding-top:max(10px, env(safe-area-inset-top))}
-#lbbar button{font:inherit;font-size:15px;padding:8px 14px;border-radius:8px;border:1px solid #666;background:#222;color:#eee;cursor:pointer}
+#lbbar button{font:inherit;font-size:15px;padding:8px 14px;border-radius:8px;border:1px solid rgba(0,0,0,.15);background:rgba(255,255,255,.82);color:#111;cursor:pointer}
 #lbsel.on{background:#2a6fdb;border-color:#2a6fdb;color:#fff}
-#lbn{flex:1;text-align:center;font-size:14px;color:#aaa}
+#lbn{margin:0 auto;font-size:14px;color:#111;background:rgba(255,255,255,.82);padding:4px 10px;border-radius:6px}
 #lbwrap{max-width:calc(100vw - 120px);max-height:calc(100vh - 140px);display:flex;align-items:center;justify-content:center}
 #lbimg{max-width:calc(100vw - 120px);max-height:calc(100vh - 140px);object-fit:contain;border-radius:4px}
 #lbload{position:absolute;color:#aaa;font-size:14px}
 .lbnav{position:absolute;top:50%;transform:translateY(-50%);font-size:44px;line-height:1;width:52px;height:84px;
-  border:none;border-radius:10px;background:rgba(255,255,255,.08);color:#fff;cursor:pointer}
+  border:none;border-radius:10px;background:rgba(255,255,255,.75);color:#111;cursor:pointer}
 #lbp{left:6px} #lbnx{right:6px}
-#lbcap{position:absolute;bottom:0;left:0;right:0;padding:10px 16px;padding-bottom:max(10px, env(safe-area-inset-bottom));
-  font-size:13px;color:#ccc;text-align:center;word-break:break-word}
+#lbcap{position:absolute;bottom:max(10px, env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);max-width:calc(100% - 32px);
+  box-sizing:border-box;padding:6px 12px;border-radius:6px;background:rgba(255,255,255,.82);
+  font-size:13px;color:#111;text-align:center;word-break:break-word}
+#lbcap:empty{display:none}
+#lbextra{position:absolute;top:calc(max(10px, env(safe-area-inset-top)) + 46px);left:50%;transform:translateX(-50%);
+  max-width:calc(100% - 32px);box-sizing:border-box;padding:6px 12px;border-radius:6px;background:rgba(255,255,255,.88);
+  font-size:13px;line-height:1.5;color:#111;text-align:center;z-index:2}
+#lbextra[hidden]{display:none}
+#lbextra a{color:#1f5bbd;font-weight:600}
 @media (max-width:700px){#lbwrap,#lbimg{max-width:100vw} .lbnav{display:none}}
 </style>
 <script>
 (function(){
   const lb = document.getElementById('lb'), img = document.getElementById('lbimg'), cap = document.getElementById('lbcap'),
-        sel = document.getElementById('lbsel'), num = document.getElementById('lbn'), load = document.getElementById('lbload');
+        sel = document.getElementById('lbsel'), num = document.getElementById('lbn'), load = document.getElementById('lbload'),
+        extra = document.getElementById('lbextra');
   let cur = -1, x0 = null;
   const links = () => Array.from(document.querySelectorAll('a.open'));
   function fig(){ const a = links()[cur]; return a ? a.closest('figure') : null; }
@@ -1076,6 +1090,8 @@ LIGHTBOX = r"""<div id="lb" hidden>
     const fc = f ? f.querySelector('figcaption') : null;
     cap.textContent = fc ? fc.innerText.replace(/\s*Bild öffnen\s*/g, '').replace(/\n+/g, ' · ') : '';
     num.textContent = (cur + 1) + ' / ' + a.length;
+    const exs = f ? f.querySelector('.lbextra') : null;
+    extra.innerHTML = exs ? exs.innerHTML : ''; extra.hidden = !exs;
     paintSel();
     if (lb.hidden) { lb.hidden = false; document.body.style.overflow = 'hidden';
       try { history.pushState({lb: 1}, ''); } catch (e) {} }
@@ -1091,6 +1107,12 @@ LIGHTBOX = r"""<div id="lb" hidden>
     show(links().indexOf(a));
   }, true);
   document.getElementById('lbx').onclick = close;
+  extra.addEventListener('click', ev => {          // Querverweis: Bildansicht schließen, dann zur Gruppe
+    const a = ev.target.closest('a'); if (!a) return;
+    ev.preventDefault(); ev.stopPropagation();
+    const h = a.getAttribute('href'); hideNow();
+    setTimeout(() => { location.hash = h; }, 0);
+  });
   document.getElementById('lbp').onclick = () => show(cur - 1);
   document.getElementById('lbnx').onclick = () => show(cur + 1);
   sel.onclick = () => { const f = fig(); if (!f) return; f.classList.toggle('sel');
@@ -1124,12 +1146,8 @@ def write_status(counts, summary, final):
     write_index(counts, summary, final)
 
 
-LAST_INDEX = [None]      # letzte Daten der Übersicht – damit sie nach dem Löschen sofort neu geschrieben werden kann
-
-
 def write_index(counts, summary, final):
     """Übersichtsseite reports/index.html – im Browser über die Webseite oder als Datei."""
-    LAST_INDEX[0] = (counts, summary, final)
     n, g, t, c, r = counts
     pct = lambda a, b: f"{100 * a / b:.0f} %" if b else "–"  # noqa: E731
     pw = lambda a, b: f"{100 * a / b:.1f}%" if b else "0%"  # noqa: E731
@@ -1182,11 +1200,13 @@ a{{color:#2a6fdb;text-decoration:none}} a:hover{{text-decoration:underline}}
 .bar>div{{height:100%;background:#2a6fdb}}
 a.newbtn{{display:inline-block;padding:10px 16px;border-radius:8px;background:#2a6fdb;color:#fff;font-weight:600}}
 a.newbtn:hover{{text-decoration:none;background:#1f5bbd}}
+a.newbtn.alt{{background:transparent;color:#2a6fdb;border:1px solid #2a6fdb;margin-left:6px}}
+a.newbtn.alt:hover{{background:rgba(42,111,219,.1)}}
 button.del{{font:inherit;font-size:13px;padding:4px 10px;border-radius:6px;border:1px solid #c0392b;background:transparent;color:#c0392b;cursor:pointer}}
 </style></head><body>
 <h1>Bildsuche</h1>
-<p><a class="newbtn" href="/assistent">＋ Neue Suche anlegen</a></p>
-<p><a href="/config">⚙︎ Konfiguration ansehen &amp; bearbeiten</a> · <a href="/protokoll">☰ Protokoll</a></p>
+<p><a class="newbtn" href="/assistent">＋ Neue Suche anlegen</a> <a class="newbtn alt" href="/themen">▦ Bilder nach Themen erkunden</a></p>
+<p><a href="/themen">▦ Themen</a> · <a href="/config">⚙︎ Konfiguration ansehen &amp; bearbeiten</a> · <a href="/protokoll">☰ Protokoll</a></p>
 <div class="meta">Bildpfad: <b>{html.escape(CURRENT_ROOT[0])}</b> · Stand {datetime.now():%d.%m.%Y %H:%M} · {state}<br>
 Stufe 1 Gesamtbild: {g} / {n} ({pct(g, n)})<div class="bar"><div style="width:{pw(g, n)}"></div></div>
 Stufe 2 Kacheln: {t} / {n} ({pct(t, n)})<div class="bar"><div style="width:{pw(t, n)}"></div></div>
@@ -2145,6 +2165,25 @@ function retry(){
 (async () => {
   try { INFO = await api('/api/assistent/info'); } catch (e) {}
   if (!INFO.ready) document.getElementById('stepinfo').textContent = 'Hinweis: Die Bildsuche lädt gerade ihren Index – die Probebilder am Ende gehen erst danach.';
+  // Aus der Themen-Seite: Vorschlag einer Gruppe übernehmen und bei den Formulierungen einsteigen
+  const thema = new URLSearchParams(location.search).get('thema');
+  if (thema) {
+    try {
+      const j = await (await fetch('/api/themen?n=' + encodeURIComponent(thema))).json();
+      if (j.ready && j.search) {
+        D.motiv = j.t; D.kind = 'objekt'; D.strict = 'ausgewogen';
+        D.terms = j.search.pos.slice(); D.termsTouched = true;
+        D.negatives = j.search.neg.filter(n => n.toLowerCase() !== 'ein foto');
+        D.name = slug(j.t); D.nameTouched = true;
+        document.getElementById('card').insertAdjacentHTML('beforebegin',
+          '<div class="why" style="margin-bottom:14px"><b>Vorschlag aus der Themen-Gruppe „' + esc(j.crumbs.slice(1).map(c => c.t).join(' › ')) +
+          '“ übernommen.</b> Die Formulierungen sind einzelne Begriffe – ein kurzer Satz wie eine Bildunterschrift trifft oft besser. ' +
+          'Prüfe sie, die Ausschlüsse, Strenge und Namen; danach kommen die Probebilder. Mit „Zurück“ erreichst du auch die ersten Fragen.</div>');
+        go(3);
+        return;
+      }
+    } catch (e) {}
+  }
   go(0);
 })();
 </script></body></html>"""
@@ -2208,6 +2247,1116 @@ load();
 </script></body></html>"""
 
 
+# ================================================================ Themen (semantische Gruppen)
+# Alle Bilder werden anhand ihrer Gesamtbild-Vektoren (Stufe 1) hierarchisch gruppiert:
+# oben ~12 grobe Themen, darunter jeweils bis zu 10 feinere, bis die Gruppen klein genug sind,
+# um die Bilder einzeln zu zeigen. Die Bilder werden dabei so sortiert, dass jede Gruppe ein
+# zusammenhängender Abschnitt [s, e) ist – "alle Bilder dieser Gruppe" ist dann nur ein Ausschnitt.
+# Namen: Das CLIP-Modell vergleicht den Mittelpunkt jeder Gruppe mit einer deutschen Begriffsliste
+# und nimmt die Begriffe, die diese Gruppe am besten von ihren Geschwistern UNTERSCHEIDEN.
+THEMEN_TOP_K = 12          # grobe Themen auf der obersten Ebene
+THEMEN_SUB_K = 10          # höchstens so viele Untergruppen je Gruppe
+THEMEN_LEAF = 80           # ab dieser Größe wird nicht weiter geteilt
+THEMEN_PAGE = 120          # Bilder pro Seite in der Bildansicht
+THEMEN_FIT = 20000         # Stichprobe, auf der k-Means rechnet (Zuordnung danach für alle)
+THEMEN_AUTO_NEW = 0.02     # automatisch neu berechnen ab 2 % neuer/fehlender Bilder
+THEMEN_FORMAT = 4          # 4: + Suchvorschlag je Gruppe (2026-11-13b); 3: Begriffs-Hierarchie, Stufe 2+3, Querverweise
+
+# Begriffe in drei Ebenen: "Oberbegriff | Bereich: Begriff; Begriff; …". Jeder Begriff steht genau einmal.
+# Namen werden aus Oberbegriffen, Bereichen oder einzelnen Begriffen gewählt – je nachdem, was die
+# Gruppe am besten zusammenfasst und von ihren Nachbarn abgrenzt.
+THEMEN_TAXONOMIE = """
+Menschen | Personen: Menschen; Porträt; Selfie; Paar; Gruppenfoto; Menschenmenge; Freunde; Touristen; Senioren; Jugendliche; Teenager
+Menschen | Familie: Familie; Großeltern; Geschwister; Mutter mit Kind; Vater mit Kind
+Menschen | Babys: Baby; Kleinkind; schlafendes Kind; Kinderwagen; Wickeltisch; Babybett; Stillen; Kinderhochstuhl; erste Schritte
+Menschen | Kinder: Kinder; lachende Kinder; Kinder beim Spielen
+Feste | Familienfeste: Hochzeit; Brautpaar; Taufe; Kommunion; Konfirmation; Jubiläum; Familienfeier
+Feste | Geburtstage: Geburtstag; Geburtstagskuchen; Kindergeburtstag
+Feste | Weihnachten: Weihnachten; Weihnachtsbaum; Geschenke auspacken; Adventskranz; Nikolaus; Weihnachtsessen; Weihnachtsmarkt
+Feste | Bräuche im Jahreslauf: Ostern; Ostereier; Ostereiersuche; Fasnet; Kostüme; Halloween; Kürbis; Laterne; Martinsumzug; Erntedank; Silvester; Feuerwerk
+Feste | Feiern & Vereine: Party; Gartenfest; Grillfest; Picknick; Volksfest; Festumzug; Verein; Vereinsfest; Ehrung; Urkunde
+Kultur & Ausflüge | Musik & Bühne: Konzert; Bühne; Theateraufführung; Musiker; Musikinstrument; Akkordeon; Gitarre; Klavier; Blasmusik
+Kultur & Ausflüge | Ausflugsziele: Jahrmarkt; Karussell; Zirkus; Freizeitpark; Achterbahn; Zoo; Tierpark; Aquarium; Museum; Ausstellung
+Kultur & Ausflüge | Kunst: Gemälde; Kunstwerk; Skulptur; Graffiti; Denkmal; Statue
+Spielen | Spielplatz: Spielplatz; Rutsche; Schaukel; Sandkasten; Trampolin; Planschbecken; Hängematte
+Spielen | Spielzeug: Spielzeug; Spielfiguren; Puppe; Kuscheltier; Spielzeugauto; Modelleisenbahn; Modellbau
+Spielen | LEGO: LEGO; LEGO-Modell; Bausteine
+Spielen | Gesellschaftsspiele: Brettspiel; Würfelspiel; Kartenspiel; Puzzle
+Spielen | Malen & Basteln: Malen; Basteln; Kinderzeichnung
+Spielen | Laufrad & Roller: Laufrad; Roller; Inliner; Skateboard
+Wasser | Strand: Sandstrand; Sandburg; Muscheln; Strandurlaub; Sonnenschirm; Liegestuhl; Palmen
+Wasser | Meer & Küste: Meer; Wellen; Felsküste; Insel; Leuchtturm; Hafen
+Wasser | Boote & Schiffe: Boot; Segelboot; Schiff; Fähre; Kanu
+Wasser | Baden: Badesee; Schwimmbad; Hallenbad; Wasserrutsche; Pool; Schwimmen; Unterwasseraufnahme
+Wasser | Flüsse & Seen: Fluss; Bach; See; Teich; Wasserfall; Spiegelung
+Berge | Gebirge: Berge; Gipfel; Gipfelkreuz; Gletscher; Felswand; Panorama; Bergsee; Berghütte
+Berge | Klettern: Klettern; Klettersteig; Bergsteigen
+Berge | Wandern: Wandern; Wanderweg; Wanderurlaub; Waldweg
+Natur | Wald: Wald; Bäume; Herbstlaub; Pilze
+Natur | Landschaft: Landschaft; Hügel; Tal; Wiese; Feld; Getreidefeld; Weinberg; Wüste; Luftaufnahme
+Natur | Blumen: Blumen; Blüten; Blumenwiese; Blumenstrauß
+Natur | Garten: Garten; Gemüsebeet; Gartenarbeit; Rasenmähen; Apfelbaum; Beeren; Gartenhaus; Terrasse; Balkon
+Natur | Himmel & Wetter: Himmel; Wolken; Sonnenuntergang; Sonnenaufgang; Regenbogen; Gewitter; Regen; Nebel; Sternenhimmel; Mond; Nachtaufnahme
+Natur | Jahreszeiten: Sommer; Frühling; Herbst
+Winter | Schnee: Schnee; verschneite Landschaft; Schneemann; Eis
+Winter | Wintersport: Skifahren; Skipiste; Skilift; Langlauf; Snowboard; Schlittenfahren; Schlittschuhlaufen; Skiurlaub
+Tiere | Haustiere: Hund; Katze; Kaninchen; Meerschweinchen
+Tiere | Bauernhof: Bauernhof; Kühe; Pferde; Schafe; Ziegen; Hühner
+Tiere | Wildtiere & Vögel: Wildtiere; Reh; Eichhörnchen; Vögel; Enten; Schwäne; Fische
+Tiere | Insekten: Insekten; Schmetterling; Biene
+Orte & Gebäude | Stadt: Stadt; Altstadt; Skyline; Hochhäuser; Straße; Gasse; Marktplatz; Brunnen; Brücke; Rathaus; Städtereise; Sehenswürdigkeit
+Orte & Gebäude | Kirchen: Kirche; Kircheninneres; Dom; Kloster
+Orte & Gebäude | Burgen & Schlösser: Burg; Schloss; Ruine; Turm
+Orte & Gebäude | Dorf: Dorf
+Orte & Gebäude | Unterkünfte: Hotel; Hotelzimmer; Ferienwohnung; Campingplatz; Zelt; Wohnmobil; Urlaub
+Orte & Gebäude | Gastronomie: Restaurant; Café; Biergarten
+Orte & Gebäude | Einkaufen: Wochenmarkt; Geschäft; Supermarkt; Einkaufen
+Zuhause | Haus: Haus; Einfamilienhaus; Hausfassade; Dach; Haustür; Fenster; Garage
+Zuhause | Räume: Wohnzimmer; Küche; Esszimmer; Schlafzimmer; Kinderzimmer; Badezimmer; Keller; Dachboden; Treppe; Innenraum
+Zuhause | Einrichtung: Möbel; Sofa; Bett; Esstisch; Dekoration; Kerzen
+Zuhause | Handwerk & Bauen: Baustelle; Renovierung; Handwerker; Werkzeug; Werkstatt; Holz; Brennholz; Elektroinstallation; Heizung; Solaranlage; Bagger
+Zuhause | Feuer & Grill: Kaminofen; Feuer; Lagerfeuer; Grill
+Essen & Trinken | Mahlzeiten: Essen; Mahlzeit; Frühstück; gedeckter Tisch; Buffet; Pizza; Nudeln; Salat; Kochen
+Essen & Trinken | Backen & Kuchen: Kuchen; Torte; Plätzchen; Backen; Brot
+Essen & Trinken | Obst & Gemüse: Obst; Gemüse
+Essen & Trinken | Getränke & Eis: Getränke; Wein; Bier; Kaffee; Eiscreme
+Fahrzeuge | Autos: Auto; Oldtimer; Sportwagen; Autorennen; Parkplatz; Autobahn
+Fahrzeuge | Zweiräder: Motorrad; Fahrrad; Radtour; Mountainbike
+Fahrzeuge | Bahn & Bus: Bus; Zug; Straßenbahn; Bahnhof
+Fahrzeuge | Fliegen: Flugzeug; Blick aus dem Flugzeugfenster; Hubschrauber; Flughafen
+Fahrzeuge | Einsatz- & Nutzfahrzeuge: Traktor; Feuerwehrauto; Krankenwagen; Feuerwehr; Polizei
+Sport | Ballsport: Fußball; Fußballspiel; Tennis; Handball; Basketball; Volleyball; Tischtennis; Golf
+Sport | Training & Wettkampf: Sport; Turnen; Leichtathletik; Joggen; Laufwettbewerb; Radrennen; Yoga; Fitnessstudio; Sporthalle; Stadion; Siegerehrung; Pokal
+Sport | Reiten: Reiten
+Schule & Arbeit | Schule: Schule; Klassenzimmer; Kindergarten; Hausaufgaben; Lesen; Buch; Einschulung; Schultüte; Abschlussfeier; Hörsaal; Tafel
+Schule & Arbeit | Beruf: Büro; Arbeitsplatz; Schreibtisch; Vortrag; Präsentation; Besprechung; Fabrikhalle; Maschine
+Schule & Arbeit | Technik: Computer; Laptop; Smartphone; Bildschirm; Elektronik; Kabel
+Dokumente & Bildarten | Dokumente: Dokument; Text; Brief; Rechnung; Formular; Notizen; Zeitungsartikel; Landkarte; Plan; Schild; Plakat
+Dokumente & Bildarten | Bildschirmfotos: Bildschirmfoto
+Dokumente & Bildarten | Alte Fotos: abfotografiertes Foto; altes Foto; Schwarzweißfoto
+Dokumente & Bildarten | Nahaufnahmen: Nahaufnahme; Makroaufnahme
+Kleidung | Kleidung: Kleidung; Schuhe; Tracht; Uniform; Sonnenbrille; Mütze
+"""
+
+
+THEMEN = {"root": None, "tree": None, "mtime": 0}     # geladener Baum des aktuellen Bildpfads
+THEMEN_LOCK = threading.Lock()
+THEMEN_STATE = {"running": False, "message": "", "error": "", "step": 0, "steps": 4, "phase": "",
+                "done": 0, "total": 0, "t_start": 0, "t_phase": 0, "holds_index": False}
+THEMEN_PHASES = ["Begriffe vorbereiten", "Bildmerkmale zusammenführen", "Gruppen bilden", "Gruppen benennen",
+                 "Querverweise suchen", "Vorschaubilder vorbereiten"]
+
+
+def themen_phase(step, total=0):
+    """Fortschritt: neuer Schritt (1..6) mit erwarteter Menge."""
+    THEMEN_STATE.update(step=step, phase=THEMEN_PHASES[step - 1], done=0, total=total, t_phase=time.time(),
+                        message=f"Schritt {step} von {len(THEMEN_PHASES)}: {THEMEN_PHASES[step - 1]} …")
+    log.info("Themen: %s", THEMEN_STATE["message"])
+
+
+def themen_tick(done):
+    THEMEN_STATE["done"] = done
+
+
+def themen_status():
+    st = THEMEN_STATE
+    out = {k: st[k] for k in ("running", "message", "error", "step", "phase", "done", "total")}
+    out["steps"] = len(THEMEN_PHASES)
+    now = time.time()
+    out["elapsed"] = int(now - st["t_start"]) if st["running"] and st["t_start"] else 0
+    eta = None
+    if st["running"] and st["total"] and st["done"] > 0:
+        rate = st["done"] / max(1e-3, now - st["t_phase"])
+        eta = int((st["total"] - st["done"]) / rate)
+    out["eta"] = eta
+    return out
+THEMEN_THUMB_SEM = threading.Semaphore(2)              # höchstens 2 Bilder gleichzeitig umrechnen
+
+
+def themen_file(root):
+    base = os.path.basename(index_file(root)).rsplit(".", 1)[0]
+    return os.path.join(DATA_DIR, "themen", base + ".json.gz")
+
+
+def themen_tree(root=None):
+    """Baum des (aktuellen) Bildpfads, bei Bedarf von der Platte geladen. None = noch nicht berechnet."""
+    import gzip
+    root = root or CURRENT_ROOT[0]
+    if not root:
+        return None
+    fn = themen_file(root)
+    try:
+        mt = os.path.getmtime(fn)
+    except OSError:
+        return None
+    with THEMEN_LOCK:
+        if THEMEN["root"] == root and THEMEN["mtime"] == mt and THEMEN["tree"] is not None:
+            return THEMEN["tree"]
+    try:
+        with gzip.open(fn, "rt", encoding="utf-8") as f:
+            tree = json.load(f)
+        if tree.get("format") != THEMEN_FORMAT:
+            return None
+    except Exception as e:
+        log.warning("Themen-Datei konnte nicht gelesen werden (%s) – wird neu berechnet.", e)
+        return None
+    with THEMEN_LOCK:
+        THEMEN.update(root=root, tree=tree, mtime=mt)
+    return tree
+
+
+def _kmeans(X, k, rng, iters=25):
+    """Sphärisches k-Means (Kosinus) mit k-means++-Start. X: (m, d) float32, Zeilen normiert."""
+    m = len(X)
+    k = max(1, min(k, m))
+    C = np.empty((k, X.shape[1]), np.float32)
+    C[0] = X[rng.integers(m)]
+    best = X @ C[0]
+    for j in range(1, k):                       # k-means++: weit entfernte Punkte bevorzugen
+        d = np.clip(1.0 - best, 0, None) ** 2
+        tot = float(d.sum())
+        idx = int(rng.choice(m, p=d / tot)) if tot > 0 else int(rng.integers(m))
+        C[j] = X[idx]
+        best = np.maximum(best, X @ C[j])
+    a = None
+    for _ in range(iters):
+        sims = X @ C.T
+        na = sims.argmax(axis=1)
+        if a is not None and (na != a).mean() < 0.002:
+            a = na
+            break
+        a = na
+        for j in range(k):
+            sel = a == j
+            if sel.any():
+                c = X[sel].sum(axis=0)
+                C[j] = c / (np.linalg.norm(c) or 1.0)
+            else:                                # leere Gruppe: am schlechtesten passenden Punkt übernehmen
+                C[j] = X[int(sims.max(axis=1).argmin())]
+    return C
+
+
+def _centroid(G, ids, chunk=20000):
+    c = np.zeros(G.shape[1], np.float64)
+    for a in range(0, len(ids), chunk):
+        c += G[ids[a:a + chunk]].astype(np.float32).sum(axis=0)
+    c = c.astype(np.float32)
+    return c / (np.linalg.norm(c) or 1.0)
+
+
+def _reps(G, ids, c, n=4, thr=0.95, look=200):
+    """Typische Bilder: nah am Mittelpunkt, aber keine Serienbilder doppelt."""
+    look_ids = ids[:look]                         # ids sind bereits nach Nähe zum Mittelpunkt sortiert
+    picked = []
+    for i in look_ids:
+        g = G[i].astype(np.float32)
+        if all(float(g @ G[j].astype(np.float32)) < thr for j in picked):
+            picked.append(int(i))
+        if len(picked) >= n:
+            break
+    return picked
+
+
+def _vocab_matrix(base, vocab, offset=0):
+    """Begriffe als Textvektoren (einmal berechnet, im Datenordner zwischengespeichert)."""
+    key = hashlib.sha1(("|".join(vocab) + base.key).encode("utf-8")).hexdigest()[:12]
+    fn = os.path.join(DATA_DIR, "themen", f"begriffe_{key}.npy")
+    try:
+        V = np.load(fn)
+        if V.shape[0] == len(vocab):
+            return V
+    except Exception:
+        pass
+    texts = vocab + [f"ein Foto: {t}" for t in vocab]
+    out, bs = [], 16
+    themen_tick(offset)
+    with base.torch.no_grad():               # stapelweise statt einzeln: ein Vielfaches schneller
+        for a in range(0, len(texts), bs):
+            f = base.model.encode_text(base.tokenizer(texts[a:a + bs]))
+            f = f / f.norm(dim=-1, keepdim=True)
+            out.append(f.cpu().numpy().astype(np.float32))
+            themen_tick(offset + min(len(texts), a + bs) // 2)
+    E = np.vstack(out)
+    V = E[:len(vocab)] + E[len(vocab):]
+    V = (V / np.linalg.norm(V, axis=1, keepdims=True)).astype(np.float32)
+    os.makedirs(os.path.dirname(fn), exist_ok=True)
+    np.save(fn, V)
+    return V
+
+
+def themen_taxonomy():
+    """Begriffe in drei Ebenen: Oberbegriff › Bereich › Begriff. Liefert (Begriffe, Konzepte).
+    Ein Konzept ist ein Name mit der Menge seiner Begriffe – daraus werden die Gruppennamen gewählt."""
+    vocab, concepts, ober = [], [], {}
+    for line in THEMEN_TAXONOMIE.strip().splitlines():
+        head, terms = line.split(":", 1)
+        o, m = [x.strip() for x in head.split("|")]
+        idx = []
+        for t in terms.split(";"):
+            t = t.strip()
+            if t:
+                idx.append(len(vocab))
+                vocab.append(t)
+        concepts.append({"name": m, "kind": "bereich", "terms": frozenset(idx)})
+        ober.setdefault(o, set()).update(idx)
+    for o, idx in ober.items():
+        if o not in {c["name"] for c in concepts}:
+            concepts.append({"name": o, "kind": "ober", "terms": frozenset(idx)})
+        else:                                     # gleichnamiger Bereich (z. B. "Kleidung"): nur einmal
+            for c in concepts:
+                if c["name"] == o:
+                    c["terms"] = frozenset(idx)
+    names = {c["name"] for c in concepts}
+    for j, t in enumerate(vocab):
+        if t not in names:
+            concepts.append({"name": t, "kind": "begriff", "terms": frozenset([j])})
+    return vocab, concepts
+
+
+def _assign2(X, ids, C, chunk=20000):
+    """Beste und zweitbeste Gruppe je Bild + Abstand (für Querverweise)."""
+    best = np.empty(len(ids), np.int32)
+    second = np.empty(len(ids), np.int32)
+    margin = np.empty(len(ids), np.float32)
+    for a in range(0, len(ids), chunk):
+        S = X[ids[a:a + chunk]].astype(np.float32) @ C.T
+        o = np.argsort(-S, axis=1)[:, :2] if S.shape[1] > 1 else np.zeros((len(S), 2), np.int64)
+        r = np.arange(len(S))
+        best[a:a + chunk] = o[:, 0]
+        second[a:a + chunk] = o[:, 1]
+        margin[a:a + chunk] = S[r, o[:, 0]] - S[r, o[:, 1]] if S.shape[1] > 1 else 1.0
+    return best, second, margin
+
+
+def _softmax_rows(L):
+    L = L - L.max(axis=-1, keepdims=True)
+    P = np.exp(L)
+    return P / P.sum(axis=-1, keepdims=True)
+
+
+def themen_search_hits(settings, searches):
+    """Bestätigte Treffer der aktiven Suchen (relative Pfade) – Wissen aus Stufe 3."""
+    disp_root = settings["display_root"].rstrip("/")
+    out = {}
+    for q in searches:
+        rels = set()
+        try:
+            with open(os.path.join(REPORT_DIR, q["name"], "results.csv"), encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f, delimiter=";"):
+                    if row.get("status") == "bestätigt" and row["pfad"].startswith(disp_root):
+                        rels.add(row["pfad"][len(disp_root):].lstrip("/"))
+        except (OSError, KeyError):
+            continue
+        if len(rels) >= 30:
+            out[q["name"]] = rels
+    return out
+
+
+def themen_pretty(name):
+    words = re.split(r"[_\s]+", name.strip())
+    return " ".join(w[:1].upper() + w[1:] for w in words if w)
+
+
+def themen_build(src, root):
+    """Baut den Themenbaum aus allem, was der Index schon weiß:
+       Gruppen   – Stufe 1 (Gesamtbild) + Stufe 2 (Kacheln, wo schon gerechnet)
+       Namen     – Begriffe je Bild aus Stufe 1+2, bei geprüften Bildern zusätzlich das starke Modell
+                   aus Stufe 3, dazu die bestätigten Treffer der Suchen
+       Querverweise – Bilder, die fast genauso gut in eine Nachbargruppe passen."""
+    import gzip
+    t0 = time.time()
+    st, base, strong = src["store"], src["base"], src["strong"]
+    ids_g = src["ids"]                             # Store-Indizes der Bilder mit Gesamtbild-Vektor
+    n = len(ids_g)
+    rel_paths = src["rel"]
+    rng = np.random.default_rng(42)
+    vocab, concepts = themen_taxonomy()
+
+    # ---- 1. Begriffe als Textvektoren (beide Modelle)
+    themen_phase(1, len(vocab) * (2 if strong is not None else 1))
+    V = _vocab_matrix(base, vocab)
+    Vs = None
+    if strong is not None and st.R:
+        try:
+            Vs = _vocab_matrix(strong, vocab, offset=len(vocab))
+        except Exception as e:
+            log.warning("Themen: Begriffe für das Prüfmodell nicht verfügbar (%s) – nur Stufe 1+2.", e)
+
+    # ---- 2. Merkmal je Bild: Gesamtbild, ergänzt um den Mittelwert der Kacheln (wo vorhanden)
+    themen_phase(2, n)
+    X = np.empty((n, st.G.shape[1]), np.float16)
+    with_t = 0
+    for a in range(0, n, 20000):
+        part = ids_g[a:a + 20000]
+        x = st.G[part].astype(np.float32)
+        ht = st.has_t[part]
+        if ht.any():
+            x[ht] += 0.5 * st.T[part[ht]].astype(np.float32).mean(axis=1)
+            with_t += int(ht.sum())
+        x /= np.linalg.norm(x, axis=1, keepdims=True) + 1e-9
+        X[a:a + 20000] = x
+        themen_tick(min(n, a + 20000))
+    r_set = {i for i in list(st.R.keys())} if Vs is not None else set()
+    log.info("Themen: %d Bilder, davon %d mit Kacheln (Stufe 2) und %d geprüft (Stufe 3).",
+             n, with_t, sum(1 for i in ids_g if int(i) in r_set) if r_set else 0)
+
+    # ---- 3. Gruppen bilden (hierarchisches k-Means) + Kandidaten für Querverweise
+    themen_phase(3, n)
+    order = []
+    nodes = [{"p": -1, "d": 0, "k": [], "s": 0, "e": 0, "r": []}]
+    stack = [(0, np.arange(n))]
+    alts = []                                       # (Bild, Nachbargruppe, Abstand)
+    done = 0
+    while stack:
+        nid, ids = stack.pop()
+        node = nodes[nid]
+        c = _centroid(X, ids)
+        node["c"] = c
+        k = THEMEN_TOP_K if nid == 0 else min(THEMEN_SUB_K, int(np.ceil(len(ids) / (THEMEN_LEAF * 0.75))))
+        split = None
+        if len(ids) > THEMEN_LEAF and k >= 2:
+            fit = ids if len(ids) <= THEMEN_FIT else rng.choice(ids, THEMEN_FIT, replace=False)
+            C = _kmeans(X[fit].astype(np.float32), k, rng)
+            a, sec, mar = _assign2(X, ids, C)
+            sizes = np.bincount(a, minlength=len(C))
+            if sizes.max() < 0.97 * len(ids):
+                split = (a, sec, mar, sizes)
+        if split is None:
+            sims = np.concatenate([X[ids[x:x + 20000]].astype(np.float32) @ c for x in range(0, len(ids), 20000)])
+            ids = ids[np.argsort(-sims)]
+            node["s"] = len(order)
+            order.extend(int(i) for i in ids)
+            node["e"] = len(order)
+            node["r"] = _reps(X, ids, c)
+            done += len(ids)
+            themen_tick(done)
+            continue
+        a, sec, mar, sizes = split
+        kids, node_of = [], {}
+        for j in np.argsort(-sizes):
+            if sizes[j] == 0:
+                continue
+            nodes.append({"p": nid, "d": node["d"] + 1, "k": [], "s": 0, "e": 0, "r": []})
+            node_of[int(j)] = len(nodes) - 1
+            kids.append((len(nodes) - 1, ids[a == j]))
+        node["k"] = [kid for kid, _ in kids]
+        # Grenzgänger: die ~8 % der Bilder mit dem knappsten Abstand zur zweitbesten Gruppe (höchstens 0,02)
+        delta = min(0.02, float(np.quantile(mar, 0.08)))
+        for i, s2, m in zip(ids[mar <= delta], sec[mar <= delta], mar[mar <= delta]):
+            if int(s2) in node_of:
+                alts.append((int(i), node_of[int(s2)], float(m)))
+        for kid, kid_ids in reversed(kids):
+            stack.append((kid, kid_ids))
+    for nd in reversed(nodes):
+        if nd["k"]:
+            nd["s"] = min(nodes[x]["s"] for x in nd["k"])
+            nd["e"] = max(nodes[x]["e"] for x in nd["k"])
+    for nd in reversed(nodes):
+        if nd["k"]:
+            r, lists = [], [nodes[x]["r"] for x in nd["k"]]
+            for depth_i in range(4):
+                for lst in lists:
+                    if depth_i < len(lst) and len(r) < 4 and lst[depth_i] not in r:
+                        r.append(lst[depth_i])
+            nd["r"] = r
+    order_a = np.asarray(order, np.int64)
+    pos = np.empty(n, np.int64)
+    pos[order_a] = np.arange(n)
+
+    # ---- 4. Begriffsverteilung je Bild -> je Gruppe; Namen wählen
+    themen_phase(4, n)
+    leaf_ids = sorted((x for x, nd in enumerate(nodes) if not nd["k"]), key=lambda x: nodes[x]["s"])
+    starts = np.array([nodes[x]["s"] for x in leaf_ids], np.int64)
+    sums = np.zeros((len(leaf_ids), len(vocab)), np.float64)
+    hits = src["hits"]
+    hit_names = sorted(hits)
+    rel_index = {r: j for j, r in enumerate(rel_paths)}
+    hit_mask = np.zeros((len(hit_names), n), bool)
+    for h, name in enumerate(hit_names):
+        for r in hits[name]:
+            j = rel_index.get(r)
+            if j is not None:
+                hit_mask[h, pos[j]] = True
+    hit_sums = np.zeros((len(leaf_ids), len(hit_names)), np.float64)
+    hit_terms = np.zeros((len(hit_names), len(vocab)), np.float64)
+    scale = base.logit_scale
+    for a in range(0, n, 4000):
+        b = min(n, a + 4000)
+        sidx = ids_g[order_a[a:b]]                 # Store-Indizes in Reihenfolge
+        P = _softmax_rows(scale * (st.G[sidx].astype(np.float32) @ V.T))
+        ht = st.has_t[sidx]
+        if ht.any():                                # Kacheln: Motive am Rand bekommen ihr Gewicht
+            Tt = st.T[sidx[ht]].astype(np.float32)  # (m, 4, d)
+            Pt = _softmax_rows(scale * (Tt @ V.T)).mean(axis=1)
+            P[ht] = 0.5 * P[ht] + 0.5 * Pt
+        if Vs is not None:                          # geprüfte Bilder: starkes Modell zählt mehr
+            rows = [x for x, i in enumerate(sidx) if int(i) in r_set]
+            if rows:
+                R = np.stack([st.R[int(sidx[x])] for x in rows]).astype(np.float32)   # (m, 5, d_r)
+                Ps = _softmax_rows(strong.logit_scale * (R @ Vs.T))
+                Ps = 0.5 * Ps[:, 0] + 0.5 * Ps[:, 1:].mean(axis=1)
+                P[rows] = 0.4 * P[rows] + 0.6 * Ps
+        lo = np.searchsorted(starts, a, side="right") - 1
+        hi = np.searchsorted(starts, b, side="left")
+        seg = np.clip(starts[lo:hi] - a, 0, None)
+        sums[lo:lo + len(seg)] += np.add.reduceat(P, seg, axis=0)
+        if hit_names:
+            Hm = hit_mask[:, a:b]
+            hit_sums[lo:lo + len(seg)] += np.add.reduceat(Hm.T.astype(np.float64), seg, axis=0)
+            hit_terms += Hm.astype(np.float64) @ P
+        themen_tick(b)
+    D, H = {}, {}
+    for li, x in enumerate(leaf_ids):
+        D[x], H[x] = sums[li], hit_sums[li]
+    for x in range(len(nodes) - 1, -1, -1):
+        if nodes[x]["k"]:
+            D[x] = sum(D[k] for k in nodes[x]["k"])
+            H[x] = sum(H[k] for k in nodes[x]["k"])
+    for x in D:
+        size = max(1, nodes[x]["e"] - nodes[x]["s"])
+        D[x] = D[x] / size
+        H[x] = H[x] / size
+    # Suchen als zusätzliche Namen: "Klettersteige" gehört zum Bereich, in dem ihre Treffer meist liegen
+    for h, name in enumerate(hit_names):
+        dist = hit_terms[h] / max(1.0, hit_mask[h].sum())
+        best_c = max((c for c in concepts if c["kind"] == "bereich"),
+                     key=lambda c: sum(dist[j] for j in c["terms"]))
+        concepts.append({"name": themen_pretty(name), "kind": "suche", "h": h,
+                         "terms": frozenset(best_c["terms"]) | {f"suche:{name}"}})
+    themen_name_all(nodes, D, H, vocab, concepts, order, rel_paths)
+
+    # ---- 5. Querverweise: Grenzgänger bis zur passendsten kleinsten Gruppe hinunterführen
+    themen_phase(5, len(alts))
+    per_img, strip = {}, {}
+    for x, (i, alt, m) in enumerate(alts):
+        top = alt
+        v = X[i].astype(np.float32)
+        while nodes[alt]["k"]:
+            alt = max(nodes[alt]["k"], key=lambda kk: float(v @ nodes[kk]["c"]))
+        lst = per_img.setdefault(int(pos[i]), [])
+        if alt not in [a2 for a2, _ in lst]:
+            lst.append((alt, m))
+        for target in {top, alt}:
+            strip.setdefault(target, []).append((m, int(pos[i])))
+        if x % 2000 == 0:
+            themen_tick(x)
+    alt_map = {}
+    for p_, lst in per_img.items():
+        lst.sort(key=lambda t: t[1])
+        alt_map[str(p_)] = [a2 for a2, _ in lst[:2]]
+    for target, lst in strip.items():
+        lst.sort()
+        seen, keep = set(), []
+        for m, p_ in lst:
+            if p_ not in seen and not (nodes[target]["s"] <= p_ < nodes[target]["e"]):
+                seen.add(p_)
+                keep.append(p_)
+            if len(keep) >= 24:
+                break
+        nodes[target]["x"] = keep
+    for nd in nodes:
+        nd.pop("c", None)
+        nd["r"] = [int(pos[i]) for i in nd["r"]]
+    depth = max(nd["d"] for nd in nodes)
+    tree = {"format": THEMEN_FORMAT, "root": root, "built": datetime.now().strftime("%d.%m.%Y %H:%M"),
+            "built_ts": time.time(), "model": base.key, "n": n, "depth": depth,
+            "paths": [rel_paths[i] for i in order], "nodes": nodes, "alt": alt_map,
+            "basis": {"kacheln": with_t, "geprueft": sum(1 for i in ids_g if int(i) in r_set) if r_set else 0,
+                      "suchen": [themen_pretty(h) for h in hit_names]}}
+    fn = themen_file(root)
+    os.makedirs(os.path.dirname(fn), exist_ok=True)
+    with gzip.open(fn + ".tmp", "wt", encoding="utf-8") as f:
+        json.dump(tree, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(fn + ".tmp", fn)
+    log.info("Themen berechnet: %d Bilder in %d Gruppen, %d Ebenen, %d Querverweise (%.0fs).",
+             n, len(nodes) - 1, depth, len(alt_map), time.time() - t0)
+    return tree
+
+
+def themen_name_all(nodes, D, H, vocab, concepts, order, rel_paths):
+    """Namen je Ebene. Für Geschwister gilt:
+      - ABDECKUNG: Der Name soll möglichst alle Untergruppen der Gruppe erfassen. Gemessen wird der Anteil
+        der Bilder, die zu den Begriffen des Namens passen – gemittelt über die Untergruppen, damit eine
+        große Untergruppe nicht alles bestimmt. Dadurch wird der Name so allgemein wie nötig.
+      - ABGRENZUNG: Abgezogen wird, wie gut derselbe Name auch das beste Geschwister beschreibt. Dadurch
+        wird der Name so speziell wie möglich.
+      - Namen von Geschwistern dürfen keine Begriffe teilen (keine Überschneidung), und kein Name
+        wiederholt einen Namen weiter oben im Pfad.
+    Reicht ein Begriff nicht, sind zwei verbunden möglich ("Berge & Seen")."""
+    from collections import Counter
+    term_concepts = [c for c in concepts if c["kind"] != "suche"]
+    M = np.zeros((len(vocab), len(term_concepts)), np.float32)
+    for ci, c in enumerate(term_concepts):
+        for j in c["terms"]:
+            M[j, ci] = 1.0
+    search_c = [c for c in concepts if c["kind"] == "suche"]
+    allc = term_concepts + search_c
+
+    def cov_vec(x):
+        """Abdeckung aller Namen für Gruppe x (über die Untergruppen gemittelt)."""
+        parts = nodes[x]["k"] or [x]
+        out = []
+        for p_ in parts:
+            v = D[p_] @ M
+            if search_c:
+                v = np.concatenate([v, np.array([H[p_][c["h"]] for c in search_c], np.float32)])
+            out.append(v)
+        return np.mean(out, axis=0)
+
+    dpos = [os.path.dirname(rel_paths[i]) for i in order]
+    for nd in nodes[1:]:                           # Ordner/Jahr-Hinweis (wie bisher)
+        size = nd["e"] - nd["s"]
+        dirs = Counter(dpos[nd["s"]:nd["e"]])
+        d, c = dirs.most_common(1)[0]
+        if d and c >= 0.7 * size:
+            nd["folder"] = d.split("/")[-1]
+            nd["w"] = "Ordner " + nd["folder"] if c == size else f"meist Ordner {nd['folder']} ({100 * c // size} %)"
+            continue
+        years = Counter(d.split("/")[0] for d in dpos[nd["s"]:nd["e"]])
+        y, c = years.most_common(1)[0]
+        if re.fullmatch(r"(19|20)\d\d", y) and c >= 0.7 * size:
+            nd["w"] = f"aus {y}" if c == size else f"meist aus {y} ({100 * c // size} %)"
+
+    nodes[0]["name"] = "Alle Bilder"
+    nodes[0]["terms"] = []
+    lam = 1.0
+    for nid, nd in enumerate(nodes):
+        kids = nd["k"]
+        if not kids:
+            continue
+        used_above, x = set(), nid
+        while x > 0:
+            used_above.add(nodes[x]["name"])
+            x = nodes[x]["p"]
+        pterms = set(nd.get("terms") or [])         # Untergruppen nie allgemeiner benennen als die Gruppe selbst
+        B = np.vstack([cov_vec(k) for k in kids])  # (Geschwister, Namen)
+        if len(kids) > 1:
+            srt = np.sort(B, axis=0)
+            top1, top2 = srt[-1], srt[-2]
+            other = np.where(B >= top1, top2, top1)    # bestes ANDERES Geschwister je Name
+        else:
+            other = np.zeros_like(B)
+        S = B - lam * other
+        cands = []                                    # (Wert, Geschwister, Name, Begriffsmenge)
+        for r in range(len(kids)):
+            order_c = [ci for ci in np.argsort(-S[r]) if allc[ci]["name"] not in used_above
+                       and not (pterms and pterms < {t for t in allc[ci]["terms"] if isinstance(t, int)})][:10]
+            for ci in order_c:
+                cands.append((float(S[r, ci]), r, allc[ci]["name"], allc[ci]["terms"], float(B[r, ci])))
+            for x1 in range(min(6, len(order_c))):     # Paare aus den besten Einzelnamen
+                for x2 in range(x1 + 1, min(6, len(order_c))):
+                    c1, c2 = allc[order_c[x1]], allc[order_c[x2]]
+                    if c1["terms"] & c2["terms"]:
+                        continue
+                    cov = B[r, order_c[x1]] + B[r, order_c[x2]]
+                    oth = max((B[o, order_c[x1]] + B[o, order_c[x2]] for o in range(len(kids)) if o != r), default=0.0)
+                    val = float(cov - lam * oth - 0.06)        # kleiner Abzug für den längeren Namen
+                    joint = " · " if "&" in c1["name"] + c2["name"] else " & "
+                    cands.append((val, r, c1["name"] + joint + c2["name"], c1["terms"] | c2["terms"], float(cov)))
+        cands.sort(key=lambda t: -t[0])
+        names, taken = {}, []
+        for val, r, name, terms, cov in cands:
+            if r in names or any(terms & t for t in taken):
+                continue
+            names[r] = (name, terms, val, cov)
+            taken.append(terms)
+        for r, kid in enumerate(kids):
+            knd = nodes[kid]
+            if r in names and (names[r][2] > 0.04 or not knd.get("folder")):
+                knd["name"], terms, val, cov = names[r]
+                knd["score"] = round(val, 3)
+            elif knd.get("folder"):                    # nichts Unterscheidendes: der Ordner sagt es besser
+                knd["name"], terms = knd["folder"], frozenset()
+                knd.pop("w", None)
+            else:                                      # Notlösung: bester Name + häufigster eigener Begriff
+                ci = int(np.argmax(S[r]))
+                own = next((vocab[j] for j in np.argsort(-D[kid]) if j not in allc[ci]["terms"]), "")
+                knd["name"], terms = f"{allc[ci]['name']} ({own})" if own else allc[ci]["name"], allc[ci]["terms"]
+            knd["terms"] = sorted(t for t in terms if isinstance(t, int))
+    # Beispiele (häufigste Einzelbegriffe, die nicht schon im Namen stecken) und Anteile für den Tooltip
+    for x, nd in enumerate(nodes):
+        d = D[x]
+        top = np.argsort(-d)
+        nd["ex"] = [vocab[j] for j in top[:6] if vocab[j] != nd["name"] and d[j] >= 0.01][:3]
+        nd["top"] = [[vocab[j], round(float(d[j]) * 100)] for j in top[:6] if d[j] >= 0.01]
+        nd.pop("terms", None)
+    for x in range(1, len(nodes)):
+        nodes[x]["pos"], nodes[x]["neg"] = themen_search_terms(x, nodes, D, vocab)
+
+
+def themen_search_terms(x, nodes, D, vocab):
+    """Vorschlag für eine Suche, die diese Gruppe im GANZEN Archiv findet.
+    Positiv: Begriffe, die in der Gruppe häufig und im Archiv insgesamt selten sind (Anteil · log Lift).
+    Negativ: Begriffe, die in den ähnlichsten Nachbargruppen häufig, in dieser Gruppe aber selten sind –
+    genau die Bilder, die eine Suche sonst fälschlich mitnehmen würde."""
+    eps = 1e-6
+    d, g = D[x], D[0]
+    score = d * np.log((d + eps) / (g + eps))
+    pos = []
+    for j in np.argsort(-score)[:8]:
+        if d[j] < 0.03 or score[j] <= 0:
+            continue
+        if pos and d[j] < 0.3 * d[pos[0]]:
+            continue
+        pos.append(int(j))
+        if len(pos) == 4:
+            break
+    if not pos:
+        pos = [int(np.argmax(d))]
+    # Nachbarschaft: Geschwister (nach Ähnlichkeit der Begriffsverteilung gewichtet), dann die Ebene darüber
+    neigh, wsum = np.zeros_like(d), 0.0
+    p_, weight = nodes[x]["p"], 1.0
+    me = x
+    while p_ >= 0 and weight > 0.2:
+        for sib in nodes[p_]["k"]:
+            if sib == me:
+                continue
+            sim = float(D[sib] @ d / (np.linalg.norm(D[sib]) * np.linalg.norm(d) + eps))
+            neigh += weight * sim * D[sib]
+            wsum += weight * sim
+        me, p_, weight = p_, nodes[p_]["p"], weight * 0.5
+    neg = []
+    if wsum > 0:
+        neigh /= wsum
+        nscore = neigh - 2.0 * d
+        for j in np.argsort(-nscore):
+            if len(neg) == 5 or nscore[j] <= 0.005:
+                break
+            if int(j) not in pos:
+                neg.append(int(j))
+    return [vocab[j] for j in pos], [vocab[j] for j in neg]
+
+
+def themen_yaml(nd, path):
+    """Konfigurationsblock für searches.yaml (gleiches Format wie beim Assistenten)."""
+    q = {"name": assist_slug(nd["name"]), "terms": nd.get("pos") or [nd["name"]],
+         "own_negatives": (nd.get("neg") or []) + ["ein Foto"],
+         "threshold": STRICTNESS["ausgewogen"][0],
+         "coarse_threshold": round(STRICTNESS["ausgewogen"][0] - STRICTNESS["ausgewogen"][1], 2)}
+    lines = assist_yaml_block(q, path).splitlines()
+    lines[0] = f"  # Themen-Gruppe „{' '.join(path.split())[:100]}“ – Vorschlag vom {datetime.now():%d.%m.%Y}"
+    return "\n".join(lines) + "\n"
+
+
+def themen_job(src, root, reason):
+    # Bewusst KEINE niedrigere Priorität: Die Bildsuche rechnet ständig, ein gebremster Thread
+    # bekäme dann fast keine Rechenzeit (2026-11-12a: "Begriffe vorbereiten" hing so über 10 Minuten).
+    THEMEN_STATE.update(running=True, error="", message="Berechnung startet …", t_start=time.time(), holds_index=True)
+    log.info("Themen: Berechnung gestartet (%s, %d Bilder).", reason, len(src["rel"]))
+    try:
+        tree = themen_build(src, root)
+        src.clear()                                # Index freigeben (der Neu-Scan wartet darauf)
+        THEMEN_STATE["holds_index"] = False
+        gc.collect()
+        todo = []
+        for nd in tree["nodes"]:
+            if nd["d"] <= 2:
+                todo.extend(nd["r"])
+        todo = list(dict.fromkeys(todo))
+        themen_phase(6, len(todo))
+        for x, k in enumerate(todo):
+            themen_tick(x + 1)
+            with THEMEN_THUMB_SEM:
+                thumb_for(os.path.join(root, tree["paths"][k]))
+        THEMEN_STATE.update(message="", step=0, phase="", done=0, total=0)
+        log.info("Themen: fertig (%.0f Minuten).", (time.time() - THEMEN_STATE["t_start"]) / 60)
+    except Exception as e:
+        THEMEN_STATE.update(error=f"Berechnung fehlgeschlagen: {e}", message="")
+        log.error("Themen: Berechnung fehlgeschlagen", exc_info=True)
+    finally:
+        src.clear()
+        THEMEN_STATE.update(running=False, holds_index=False)
+
+
+def themen_maybe_start(eng, force=False):
+    """Startet die Themen-Berechnung im Hintergrund, wenn noch keine da ist oder sich genug geändert hat.
+    Voraussetzung: Stufe 1 ist (fast) vollständig. Stufe 2 und 3 werden genutzt, soweit schon gerechnet."""
+    if eng is None or THEMEN_STATE["running"]:
+        return False, "Die Berechnung läuft bereits."
+    s = eng.store
+    n, have = len(s.paths), int(s.has_g.sum())
+    if not have or (not force and have < 0.98 * n):
+        return False, (f"Stufe 1 ist erst zu {100 * have / max(1, n):.0f} % fertig – "
+                       "die Themen werden danach automatisch berechnet.")
+    root = eng.settings["photo_root"]
+    ids = np.flatnonzero(s.has_g)
+    rel = [os.path.relpath(s.paths[i], root) for i in ids]
+    reason = "auf Wunsch" if force else None
+    if not force:
+        tree = themen_tree(root)
+        if tree is None:
+            reason = "noch keine Themen vorhanden"
+        else:
+            old = set(tree["paths"])
+            new = sum(1 for p in rel if p not in old)
+            gone = len(old) - (len(rel) - new)
+            if new + gone >= max(500, THEMEN_AUTO_NEW * len(rel)):
+                reason = f"{new} neue, {gone} entfernte Bilder"
+        if reason is None:
+            return False, "Die Themen sind aktuell."
+    try:
+        hits = themen_search_hits(eng.settings, eng.searches)
+    except Exception as e:
+        log.warning("Themen: Suchtreffer nicht lesbar (%s)", e)
+        hits = {}
+    # Keine Kopie der Vektoren (das wären bis zu 1 GB): Der Thread liest direkt aus dem Index.
+    # Dafür wartet ein Neu-Scan, bis er fertig ist (THEMEN_STATE["holds_index"]).
+    strong = eng.strong if (eng.strong is not None and eng.settings.get("rerank", True)) else None
+    src = {"store": s, "ids": ids, "rel": rel, "base": eng.base, "strong": strong, "hits": hits}
+    THEMEN_STATE.update(running=True, holds_index=True, message="Berechnung startet …", error="", step=0,
+                        done=0, total=0, t_start=time.time())
+    threading.Thread(target=themen_job, args=(src, root, reason), name="themen", daemon=True).start()
+    return True, "Die Berechnung wurde gestartet. Das dauert einige Minuten."
+
+
+def _themen_leaf_of(tree, k):
+    """Kleinste Gruppe, in der das Bild an Position k steht (über die sortierten Abschnitte)."""
+    import bisect
+    li = tree.get("_leaves")
+    if li is None:
+        leaves = sorted((x for x, nd in enumerate(tree["nodes"]) if not nd["k"]), key=lambda x: tree["nodes"][x]["s"])
+        li = tree["_leaves"] = (leaves, [tree["nodes"][x]["s"] for x in leaves])
+    j = bisect.bisect_right(li[1], k) - 1
+    return li[0][max(0, j)]
+
+
+def _themen_path_name(nodes, x, levels=2):
+    parts = []
+    while x > 0 and len(parts) < levels:
+        parts.append(nodes[x]["name"])
+        x = nodes[x]["p"]
+    return " › ".join(parts[::-1])
+
+
+def themen_api(qs):
+    """JSON für die Themen-Seite: Knoten mit Untergruppen oder (Blatt / "alle") eine Seite Bilder."""
+    tree = themen_tree()
+    status = themen_status()
+    if tree is None:
+        eng = ENGINE[0]
+        hint = ""
+        if eng is not None and not THEMEN_STATE["running"]:
+            n, have = len(eng.store.paths), int(eng.store.has_g.sum())
+            hint = (f"Stufe 1 ist zu {100 * have / max(1, n):.0f} % fertig." if have < 0.98 * n else "")
+        return {"ready": False, "status": status, "hint": hint}
+    nodes = tree["nodes"]
+    try:
+        nid = int((qs.get("n") or ["0"])[0])
+        page = max(0, int((qs.get("p") or ["0"])[0]))
+    except ValueError:
+        nid, page = 0, 0
+    if not 0 <= nid < len(nodes):
+        nid = 0
+    nd = nodes[nid]
+    crumbs, x = [], nid
+    while x >= 0:
+        crumbs.append({"n": x, "t": nodes[x]["name"]})
+        x = nodes[x]["p"]
+    alt = tree.get("alt", {})
+
+    def img(k, home=False):
+        it = {"k": k, "rel": tree["paths"][k]}
+        if home:                                   # Bild aus einer anderen Gruppe: Link zurück zur eigenen
+            h = _themen_leaf_of(tree, k)
+            it["home"] = {"n": h, "t": _themen_path_name(nodes, h)}
+        it["alt"] = [{"n": a2, "t": _themen_path_name(nodes, a2)} for a2 in alt.get(str(k), [])]
+        return it
+
+    out = {"ready": True, "status": status, "built": tree["built"], "total": tree["n"],
+           "groups": len(nodes) - 1, "depth": tree["depth"], "v": int(tree["built_ts"]),
+           "basis": tree.get("basis", {}),
+           "n": nid, "t": nd["name"], "ex": nd.get("ex", []), "size": nd["e"] - nd["s"], "crumbs": crumbs[::-1],
+           "kids": [{"n": k, "t": nodes[k]["name"], "ex": nodes[k].get("ex", []), "size": nodes[k]["e"] - nodes[k]["s"],
+                     "sub": len(nodes[k]["k"]), "r": nodes[k]["r"], "top": nodes[k].get("top", []),
+                     "w": nodes[k].get("w", "")}
+                    for k in nd["k"]],
+           "top": nd.get("top", []), "w": nd.get("w", ""),
+           "search": ({"pos": nd.get("pos", []), "neg": (nd.get("neg") or []) + ["ein Foto"],
+                       "yaml": themen_yaml(nd, _themen_path_name(nodes, nid, levels=9))} if nid > 0 and "pos" in nd else None),
+           "also": [img(k, home=True) for k in nd.get("x", [])]}
+    if not nd["k"] or (qs.get("alle") or ["0"])[0] == "1":
+        size = nd["e"] - nd["s"]
+        pages = max(1, -(-size // THEMEN_PAGE))
+        page = min(page, pages - 1)
+        a = nd["s"] + page * THEMEN_PAGE
+        b = min(nd["e"], a + THEMEN_PAGE)
+        out.update(page=page, pages=pages, images=[img(k) for k in range(a, b)])
+    return out
+
+
+def themen_image(qs):
+    """Vorschau (240 px) oder große Ansicht (1600 px) eines Bildes aus dem Themenbaum – nur über die
+    Position im Baum, nie über einen Pfad aus der Anfrage."""
+    tree = themen_tree()
+    if tree is None:
+        return None
+    try:
+        k = int((qs.get("k") or ["-1"])[0])
+    except ValueError:
+        return None
+    if not 0 <= k < len(tree["paths"]):
+        return None
+    full = os.path.join(tree["root"], tree["paths"][k])
+    if not os.path.isfile(full):
+        return None
+    with THEMEN_THUMB_SEM:
+        if (qs.get("g") or ["0"])[0] == "1":
+            return assist_thumb(full, big=True)
+        return thumb_for(full)
+
+
+THEMEN_HTML = r"""<!doctype html><html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bildsuche – Themen</title>
+<style>
+:root{--bg:#f6f6f4;--fg:#222;--card:#fff;--line:#e5e5e5;--mut:#888;--acc:#2a6fdb;--tile:#ddd}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1c1e;--fg:#eee;--card:#2c2c2e;--line:#444;--mut:#999;--tile:#3a3a3c}}
+body{font-family:-apple-system,system-ui,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+main{max-width:1200px;margin:0 auto;padding:20px 16px 40px}
+a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
+h1{margin:0 0 4px;font-size:26px} .meta{color:var(--mut);font-size:14px;line-height:1.6}
+.top{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+.crumbs{margin:16px 0 6px;font-size:15px;line-height:1.8}
+.crumbs a,.crumbs span{white-space:nowrap} .crumbs .sep{color:var(--mut);margin:0 6px}
+.head{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 14px}
+.head h2{margin:0;font-size:21px;flex:1 1 auto}
+button{font:inherit;font-size:14px;padding:7px 12px;border-radius:8px;border:1px solid var(--line);
+  background:var(--card);color:var(--fg);cursor:pointer}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button:disabled{opacity:.5;cursor:default}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.card{position:relative;border-radius:12px;overflow:hidden;cursor:pointer;border:1px solid var(--line);
+  background:var(--tile);transition:transform .12s, box-shadow .12s}
+.card:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(0,0,0,.18)}
+.card:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+.mos{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:2px;aspect-ratio:1/1;background:var(--tile)}
+.mos img,.mos i{width:100%;height:100%;object-fit:cover;display:block;background:var(--tile)}
+.mos.one{grid-template-columns:1fr;grid-template-rows:1fr}
+/* Beschriftung liegt auf den Bildern: schwarze Schrift, halbtransparente weiße Box – auf jedem Bild lesbar */
+.cap{position:absolute;left:8px;right:8px;bottom:8px;padding:8px 10px;border-radius:8px;color:#111;
+  background:rgba(255,255,255,.86);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+  box-shadow:0 1px 4px rgba(0,0,0,.15)}
+.cap b{display:block;font-size:15px;line-height:1.3}
+.cap em{display:block;font-style:normal;font-size:12.5px;color:#333;line-height:1.35;margin-top:1px}
+.cap .wo{display:block;font-size:12px;color:#444;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cap small{display:block;color:#444;font-size:12px;margin-top:2px}
+.mix{font-size:13px;color:var(--mut);margin:-8px 0 14px;line-height:1.6}
+.imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.imgs figure{position:relative;margin:0;border-radius:8px;overflow:hidden;border:1px solid var(--line);background:var(--tile)}
+.imgs img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--tile)}
+.imgs figcaption{position:absolute;left:4px;right:4px;bottom:4px;font-size:11px;color:#111;padding:3px 6px;border-radius:5px;
+  background:rgba(255,255,255,.86);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
+.imgs .tag{position:absolute;top:4px;left:4px;right:4px;width:max-content;max-width:calc(100% - 8px);box-sizing:border-box;
+  font-size:10.5px;color:#111;background:rgba(255,255,255,.86);padding:2px 6px;border-radius:5px;pointer-events:none;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lbextra{display:none}
+.srch{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:-4px 0 16px;font-size:13.5px;line-height:1.6}
+.srch summary{cursor:pointer;font-weight:600}
+.srch .row{margin-top:4px}
+.chip{display:inline-block;padding:1px 8px;margin:2px 3px 2px 0;border-radius:10px;font-size:12.5px}
+.chip.p{background:#dff3e4;color:#14532d} .chip.n{background:#fbe1df;color:#7f1d1d}
+.srch pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;overflow:auto;font-size:12px;margin:8px 0 6px}
+.also{margin-top:30px}
+.also h3{font-size:16px;margin:0 0 2px}
+@media (max-width:600px){.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .cap{left:5px;right:5px;bottom:5px;padding:6px 7px} .cap b{font-size:13.5px} .cap em,.cap .wo{display:none}
+  .imgs{grid-template-columns:repeat(3,minmax(0,1fr));gap:4px} .imgs figcaption{display:none}
+  .head h2{font-size:18px;flex-basis:100%}}
+.pager{display:flex;gap:10px;align-items:center;justify-content:center;margin:18px 0}
+.box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-top:18px;line-height:1.6}
+.err{color:#c0392b}
+#lbsel{display:none}
+.prog{margin-top:10px;max-width:560px}
+.prog .ph{font-size:15px;margin-bottom:6px}
+.pbar{height:8px;background:var(--tile);border-radius:4px;overflow:hidden;margin-bottom:4px}
+.pbar>div{height:100%;background:var(--acc);transition:width .6s}
+.steps{margin:8px 0 4px;padding-left:20px;font-size:13px;color:var(--mut);line-height:1.7}
+.steps li.ok{color:#2e8b57} .steps li.cur{color:var(--fg);font-weight:600}
+</style></head><body><main>
+<div class="top"><h1>Themen</h1><a href="/">← Übersicht</a></div>
+<div class="meta" id="info">wird geladen …</div>
+<div id="view"></div>
+</main>
+<script>
+(function(){
+  const view = document.getElementById('view'), info = document.getElementById('info');
+  const fmt = n => Number(n).toLocaleString('de-DE');
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  let V = 0, poll = null;
+  function state(){ const h = new URLSearchParams(location.hash.slice(1));
+    return {n: +(h.get('n') || 0), alle: h.get('alle') === '1', p: +(h.get('p') || 0)}; }
+  function go(n, alle, p){ location.hash = 'n=' + n + (alle ? '&alle=1' : '') + (p ? '&p=' + p : ''); }
+  const thumb = k => '/api/themen/bild?k=' + k + '&v=' + V;
+  const big = k => '/api/themen/bild?g=1&k=' + k + '&v=' + V;
+
+  function statusLine(st){
+    if (st.error) return '<span class="err">' + esc(st.error) + '</span>';
+    return st.message ? esc(st.message) : '';
+  }
+  const dur = s => s >= 3600 ? Math.floor(s / 3600) + ' h ' + Math.round(s % 3600 / 60) + ' min'
+                 : s >= 60 ? Math.round(s / 60) + ' min' : Math.max(1, s) + ' s';
+  function progress(st, ready){
+    if (st.error) return '<div class="err">' + esc(st.error) + '</div>';
+    if (!st.running) return '';
+    let h = '<div class="prog"><div class="ph">' + (st.step ? 'Schritt ' + st.step + ' von ' + st.steps + ': <b>' + esc(st.phase) + '</b>'
+                                                      : esc(st.message || 'Berechnung startet …')) + '</div>';
+    const pct = st.total ? Math.min(100, 100 * st.done / st.total) : 0;
+    h += '<div class="pbar"><div style="width:' + pct.toFixed(1) + '%"></div></div><div class="meta">';
+    const bits = [];
+    if (st.total) bits.push(fmt(st.done) + ' von ' + fmt(st.total) + ' (' + Math.floor(pct) + ' %)');
+    if (st.elapsed) bits.push('läuft seit ' + dur(st.elapsed));
+    if (st.eta !== null && st.eta !== undefined && st.done < st.total) bits.push('noch ca. ' + dur(st.eta));
+    h += bits.join(' · ') + '</div>';
+    const steps = ['Begriffe vorbereiten', 'Bildmerkmale zusammenführen', 'Gruppen bilden', 'Gruppen benennen',
+                   'Querverweise suchen', 'Vorschaubilder vorbereiten'];
+    h += '<ol class="steps">' + steps.map((t, i) => '<li class="' + (i + 1 < st.step ? 'ok' : i + 1 === st.step ? 'cur' : '') + '">' +
+      (i + 1 < st.step ? '✓ ' : '') + t + '</li>').join('') + '</ol>';
+    if (ready) h += '<div class="meta">Die Ansicht unten ist schon nutzbar' + (st.step === 6 ? ' – Vorschaubilder erscheinen anfangs etwas langsamer.' : ' (bisherige Einteilung).') + '</div>';
+    return h + '</div>';
+  }
+  function schedule(st){ clearTimeout(poll); if (st.running) poll = setTimeout(refreshStatus, 3000); }
+  let lastReady = null;
+  async function refreshStatus(){                         // nur den Fortschritt nachladen, nicht die Ansicht
+    let j; try { j = await (await fetch('/api/themen/status')).json(); } catch (e) { poll = setTimeout(refreshStatus, 8000); return; }
+    if (j.ready !== lastReady || (!j.running && !j.error)) { load(); return; }
+    const box = document.getElementById('progbox'); if (box) box.innerHTML = progress(j, j.ready);
+    schedule(j);
+  }
+
+  async function rebuild(btn){
+    if (!confirm('Themen jetzt neu berechnen?\n\nDas dauert einige Minuten und läuft im Hintergrund. Bis dahin bleibt die bisherige Einteilung sichtbar.')) return;
+    btn.disabled = true;
+    try { const r = await fetch('/api/themen/neu', {method: 'POST'}); const j = await r.json();
+      info.textContent = j.message; setTimeout(load, 3000);
+    } catch (e) { info.textContent = 'Fehler: ' + e; btn.disabled = false; }
+  }
+
+  async function load(){
+    const s = state();
+    let j;
+    try {
+      const r = await fetch('/api/themen?n=' + s.n + '&p=' + s.p + (s.alle ? '&alle=1' : ''));
+      j = await r.json();
+    } catch (e) { info.textContent = 'Die Bildsuche ist gerade nicht erreichbar (' + e + ').'; return; }
+    schedule(j.status);
+    lastReady = j.ready;
+    if (!j.ready){
+      info.innerHTML = '';
+      view.innerHTML = '<div class="box"><b>' + (j.status.running ? 'Die Themen werden berechnet.' : 'Die Themen sind noch nicht berechnet.') + '</b>' +
+        (j.status.running ? '<div id="progbox">' + progress(j.status, false) + '</div><div class="meta">Diese Seite aktualisiert sich von selbst.</div>'
+          : '<br>' + esc(j.hint || 'Sie werden automatisch berechnet, sobald Stufe 1 fertig ist.') + ' ' + statusLine(j.status) +
+            '<p><button class="pri" id="rb">Jetzt berechnen</button></p>') + '</div>';
+      const rb = document.getElementById('rb'); if (rb) rb.addEventListener('click', () => rebuild(rb));
+      return;
+    }
+    V = j.v;
+    info.innerHTML = fmt(j.total) + ' Bilder, automatisch nach Ähnlichkeit in ' + fmt(j.groups) + ' Gruppen auf ' +
+      j.depth + ' Ebenen sortiert · berechnet am ' + esc(j.built) + basis(j.basis) +
+      (j.status.running || j.status.error ? '' : ' · <a href="#" id="rb">neu berechnen</a>') +
+      '<div id="progbox">' + progress(j.status, true) + '</div>';
+    const rb = document.getElementById('rb');
+    if (rb) rb.addEventListener('click', ev => { ev.preventDefault(); rebuild(rb); });
+
+    let h = '<nav class="crumbs">' + j.crumbs.map((c, i) => i === j.crumbs.length - 1 && !s.alle
+      ? '<span>' + esc(c.t) + '</span>' : '<a href="#n=' + c.n + '">' + esc(c.t) + '</a>').join('<span class="sep">›</span>') +
+      (s.alle ? '<span class="sep">›</span><span>alle Bilder</span>' : '') + '</nav>';
+    h += '<div class="head"><h2>' + esc(j.t) + ' <small class="meta">' + fmt(j.size) + ' Bilder</small></h2>';
+    if (j.crumbs.length > 1) h += '<button id="up">↑ Eine Ebene höher</button>';
+    if (j.kids.length) h += s.alle ? '<button id="sw">▦ Untergruppen zeigen</button>'
+                                   : '<button id="sw">▤ Alle ' + fmt(j.size) + ' Bilder ansehen</button>';
+    h += '</div>';
+    if (j.top && j.top.length || j.w) h += '<div class="mix">' + (j.top && j.top.length ? 'Häufigste Motive: ' + esc(mix(j.top)) : '') +
+      (j.w ? (j.top && j.top.length ? ' · ' : '') + esc(j.w) : '') + '</div>';
+    if (j.search) {
+      const chips = (a, c) => a.map(t => '<span class="chip ' + c + '">' + esc(t) + '</span>').join('');
+      h += '<details class="srch"><summary>Als Suche verwenden</summary>' +
+        '<div class="row"><b>Positiv</b> (das soll auf dem Bild sein): ' + chips(j.search.pos, 'p') + '</div>' +
+        '<div class="row"><b>Negativ</b> (damit wird es leicht verwechselt): ' + chips(j.search.neg, 'n') + '</div>' +
+        '<div class="meta">Abgeleitet aus dieser Gruppe: Positiv sind Begriffe, die hier häufig und im übrigen Archiv selten sind; ' +
+        'negativ sind Begriffe, die in den ähnlichsten Nachbargruppen häufig sind, hier aber nicht. ' +
+        'Als Eintrag für die Konfiguration (unter <code>searches:</code> einfügen):</div>' +
+        '<pre id="yaml">' + esc(j.search.yaml) + '</pre><button class="pri" id="asst">Im Assistenten öffnen</button> ' +
+        '<button id="cp">Kopieren</button> <span class="meta" id="cpmsg"></span>' +
+        '<div class="meta">Der Assistent übernimmt die Begriffe, zeigt Probebilder aus deinem Archiv und stellt die Schwellen ' +
+        'anhand deiner Bewertung ein – gespeichert wird erst, wenn die Probebilder passen.</div></details>';
+    }
+    if (j.images){
+      h += pager(j) + '<div class="imgs">' + j.images.map(im => fig(im)).join('') + '</div>' + pager(j);
+    } else {
+      h += '<div class="grid">' + j.kids.map(k => {
+        const r = k.r.slice(0, 4);
+        const tiles = r.length >= 4 ? r.map(x => '<img loading="lazy" src="' + thumb(x) + '" alt="">').join('')
+                    : r.length ? '<img loading="lazy" src="' + thumb(r[0]) + '" alt="">' : '<i></i>';
+        return '<div class="card" tabindex="0" data-n="' + k.n + '" title="' + esc(mix(k.top)) + '"><div class="mos' + (r.length >= 4 ? '' : ' one') + '">' +
+          tiles + '</div><div class="cap"><b>' + esc(k.t) + '</b>' +
+          (k.ex && k.ex.length ? '<em>z. B. ' + esc(k.ex.join(' · ')) + '</em>' : '') +
+          (k.w ? '<span class="wo">' + esc(k.w) + '</span>' : '') + '<small>' + fmt(k.size) + ' Bilder' +
+          (k.sub ? ' · ' + k.sub + ' Untergruppen' : ' · Einzelbilder') + '</small></div></div>';
+      }).join('') + '</div>';
+    }
+    if (j.also && j.also.length) {
+      h += '<section class="also"><h3>Passt auch hierher</h3><div class="meta" style="margin-bottom:10px">' +
+        'Bilder aus anderen Gruppen, die fast genauso gut zu „' + esc(j.t) + '“ passen. Sie bleiben in ihrer eigenen Gruppe; ' +
+        'in der großen Ansicht führt ein Link dorthin.</div><div class="imgs">' + j.also.map(im => fig(im, true)).join('') + '</div></section>';
+    }
+    view.innerHTML = h;
+    const up = document.getElementById('up');
+    if (up) up.addEventListener('click', () => go(j.crumbs[j.crumbs.length - 2].n));
+    const asst = document.getElementById('asst');
+    if (asst) asst.addEventListener('click', () => { location.href = '/assistent?thema=' + j.n; });
+    const cp = document.getElementById('cp');
+    if (cp) cp.addEventListener('click', () => {          // ohne HTTPS gibt es navigator.clipboard nicht -> Textfeld
+      const ta = document.createElement('textarea'); ta.value = j.search.yaml; document.body.appendChild(ta); ta.select();
+      let ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+      ta.remove(); document.getElementById('cpmsg').textContent = ok ? 'Kopiert.' : 'Bitte den Text oben markieren und kopieren.';
+    });
+    const sw = document.getElementById('sw');
+    if (sw) sw.addEventListener('click', () => go(j.n, !s.alle));
+    view.querySelectorAll('.card').forEach(c => {
+      c.addEventListener('click', () => go(+c.dataset.n));
+      c.addEventListener('keydown', ev => { if (ev.key === 'Enter') go(+c.dataset.n); });
+    });
+    view.querySelectorAll('.pager button').forEach(b => b.addEventListener('click', () => go(j.n, s.alle, +b.dataset.p)));
+    window.scrollTo(0, 0);
+  }
+  function fig(im, foreign){
+    let ex = '';
+    if (im.home) ex += 'Eigene Gruppe: <a href="#n=' + im.home.n + '">' + esc(im.home.t) + '</a>';
+    if (im.alt && im.alt.length) ex += (ex ? '<br>' : '') + 'Passt auch zu: ' +
+      im.alt.map(a => '<a href="#n=' + a.n + '">' + esc(a.t) + '</a>').join(' · ');
+    return '<figure><a class="open" href="' + big(im.k) + '"><img loading="lazy" src="' + thumb(im.k) + '" alt=""></a>' +
+      (foreign ? '<span class="tag">aus: ' + esc(im.home ? im.home.t : '') + '</span>'
+               : (im.alt && im.alt.length ? '<span class="tag">↔ passt auch woanders</span>' : '')) +
+      '<figcaption title="' + esc(im.rel) + '">' + esc(im.rel.split('/').slice(-2).join(' / ')) + '</figcaption>' +
+      (ex ? '<div class="lbextra">' + ex + '</div>' : '') + '</figure>';
+  }
+  function basis(b){
+    if (!b) return '';
+    const p = [];
+    if (b.kacheln) p.push(fmt(b.kacheln) + ' mit Kacheln');
+    if (b.geprueft) p.push(fmt(b.geprueft) + ' geprüft');
+    if (b.suchen && b.suchen.length) p.push('Suchen: ' + b.suchen.map(esc).join(', '));
+    return p.length ? '<br>Grundlage: alle Gesamtbilder · ' + p.join(' · ') : '';
+  }
+  function mix(top){ return (top || []).map(x => x[0] + ' ' + x[1] + ' %').join(' · '); }
+  function pager(j){
+    if (j.pages <= 1) return '';
+    return '<div class="pager"><button data-p="' + (j.page - 1) + '"' + (j.page ? '' : ' disabled') + '>‹ zurück</button>' +
+      '<span class="meta">Seite ' + (j.page + 1) + ' von ' + j.pages + '</span>' +
+      '<button data-p="' + (j.page + 1) + '"' + (j.page < j.pages - 1 ? '' : ' disabled') + '>weiter ›</button></div>';
+  }
+  document.addEventListener('keydown', ev => {          // Pfeil hoch / Backspace = herauszoomen
+    const lb = document.getElementById('lb');
+    if ((lb && !lb.hidden) || ev.target.tagName === 'INPUT') return;
+    if (ev.key === 'Backspace' || (ev.key === 'ArrowUp' && ev.altKey)) { const u = document.getElementById('up'); if (u) { ev.preventDefault(); u.click(); } }
+  });
+  window.addEventListener('hashchange', load);
+  load();
+})();
+</script>
+"""
+
+
 def start_web():
     """Kleiner Webserver im Heimnetz: liefert NUR den Report-Ordner aus (Reports, Vorschaubilder, CSV)."""
     if WEB_PORT <= 0:
@@ -2229,7 +3378,8 @@ def start_web():
             pass
 
         def end_headers(self):
-            self.send_header("Cache-Control", "no-cache")
+            if not getattr(self, "_cacheable", False):
+                self.send_header("Cache-Control", "no-cache")
             super().end_headers()
 
         def list_directory(self, path):        # kein Durchstöbern von Ordnern
@@ -2256,7 +3406,8 @@ def start_web():
                     f'<meta http-equiv="refresh" content="30"><title>Bildsuche</title></head>'
                     f'<body style="font-family:-apple-system,system-ui,sans-serif;margin:24px">'
                     f'<h1>Bildsuche</h1><p>Die Übersicht wird gerade erstellt – diese Seite lädt sich '
-                    f'alle 30 Sekunden neu.</p><p><a href="/config">Konfiguration ansehen &amp; bearbeiten</a></p>'
+                    f'alle 30 Sekunden neu.</p><p><a href="/themen">Bilder nach Themen erkunden</a> · '
+                    f'<a href="/config">Konfiguration ansehen &amp; bearbeiten</a></p>'
                     f'<p>Vorhandene Reports:</p><ul>{links}</ul></body></html>'
                     ).encode("utf-8")
             self.send_response(200)
@@ -2324,6 +3475,32 @@ def start_web():
                 return self._send_image()
             if path == "/assistent":
                 return self._send_bytes(ASSIST_PAGE, "text/html; charset=utf-8")
+            if path == "/themen":
+                return self._send_bytes(THEMEN_HTML + LIGHTBOX + "\n</body></html>", "text/html; charset=utf-8")
+            if path == "/api/themen":
+                return self._json(200, themen_api(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)))
+            if path == "/api/themen/status":
+                st = themen_status()
+                st["ready"] = themen_tree() is not None
+                return self._json(200, st)
+            if path == "/api/themen/bild":
+                try:
+                    fn = themen_image(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
+                except Exception as e:
+                    log.warning("Themen: Vorschau nicht möglich (%s)", e)
+                    fn = None
+                if not fn:
+                    return self.send_error(404)
+                with open(fn, "rb") as fh:
+                    data = fh.read()
+                self._cacheable = True             # Vorschaubilder darf der Browser eine Woche behalten
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "private, max-age=604800")
+                self.end_headers()
+                self._cacheable = False
+                return self.wfile.write(data)
             if path == "/api/assistent/info":
                 eng = ENGINE[0]
                 try:
@@ -2391,6 +3568,13 @@ def start_web():
                 log.info("Konfiguration über die Webseite gespeichert.")
                 return self._json(200, {"ok": True, "message": "Gespeichert. " + m +
                                         " Die Reports werden in ca. 30 Sekunden neu erstellt."})
+            if urllib.parse.urlparse(self.path).path == "/api/themen/neu":
+                if ENGINE[0] is None:
+                    return self._json(409, {"message": "Die Bildsuche ist noch nicht bereit – bitte gleich noch einmal."})
+                started, msg = themen_maybe_start(ENGINE[0], force=True)
+                if started:
+                    log.info("Themen: Neuberechnung über die Webseite angestoßen.")
+                return self._json(202 if started else 409, {"message": msg})
             if self.path.startswith("/api/assistent/"):
                 try:
                     ln = int(self.headers.get("Content-Length") or 0)
@@ -2432,11 +3616,6 @@ def start_web():
                         return self._json(400, {"message": "Ungültiger Name."})
                     shutil.rmtree(target)
                     log.info("Alter Report '%s' über die Webseite gelöscht.", name)
-                    if LAST_INDEX[0]:
-                        try:
-                            write_index(*LAST_INDEX[0])      # Übersicht sofort ohne den gelöschten Report
-                        except Exception as e:
-                            log.warning("Übersicht konnte nicht sofort aktualisiert werden: %s", e)
                     return self._json(200, {"message": f"Report „{name}“ gelöscht."})
                 except Exception as e:
                     return self._json(500, {"message": f"Löschen fehlgeschlagen: {e}"})
@@ -2536,6 +3715,17 @@ def main():
                 log.info("Geändert: %s%s", "; ".join(db.rel(p) for p in changed[:50]),
                          " …" if len(changed) > 50 else "")
         rerank_key = f"{settings['rerank_model']} {settings['rerank_pretrained']}"
+        # Alten Index freigeben, BEVOR der neue gebaut wird. Sonst liegt er beim Neu-Scan kurz doppelt
+        # im Arbeitsspeicher – das hat den Container regelmäßig über mem_limit getrieben (OOM).
+        if THEMEN_STATE.get("holds_index"):
+            log.info("Neu-Scan wartet, bis die Themen-Berechnung den Index freigibt …")
+            while THEMEN_STATE.get("holds_index"):
+                time.sleep(5)
+        if ENGINE[0] is not None:
+            ENGINE[0].pool.shutdown(wait=True)
+        ENGINE[0] = None
+        eng = store = None
+        gc.collect()
         store = Store(found, db, base.dim, rerank_key)
         eng = Engine(base, db, store, settings, searches)
         ENGINE[0] = eng
@@ -2544,6 +3734,7 @@ def main():
         next_scan = time.time() + float(settings["rescan_interval_hours"]) * 3600
         if store.has_g.any():
             eng.report(final=False)          # Übersicht + Reports sofort nach dem Start aktualisieren
+        themen_checked = False               # Themen prüfen, sobald die Arbeit ruht (oder Stufe 1 fertig ist)
         last_report = time.time()
         dirty, rescan = True, False
 
@@ -2568,6 +3759,14 @@ def main():
                     log.error("Konfiguration fehlerhaft, behalte alte: %s", e)
 
             kind, batch = eng.next_task()
+            if not themen_checked and (kind is None or not eng.todo_g):
+                themen_checked = True        # einmal pro Scan: fehlende oder veraltete Themen nachrechnen
+                try:
+                    started, msg = themen_maybe_start(eng)
+                    if not started and "Stufe 1" in msg:
+                        log.info("Themen: %s", msg)
+                except Exception:
+                    log.error("Themen: Prüfung fehlgeschlagen", exc_info=True)
             if kind is None:
                 if dirty:
                     eng.progress(force=True)

@@ -1,6 +1,6 @@
 # Spezifikation
 
-Stand: Version 2026-10-30c
+Stand: Version 2026-11-13c
 
 ## Zweck
 
@@ -21,11 +21,11 @@ flowchart LR
     subgraph C["Container bildsuche"]
       S["Scan und Index<br/>SQLite pro Bildpfad"]
       P["KI-Pipeline<br/>1 Gesamtbild · 2 Kacheln · 3 Prüfung"]
-      W["Webserver :8091<br/>Reports · Bildansicht · Config · Protokoll · Alben"]
+      W["Webserver :8091<br/>Reports · Themen · Bildansicht · Config · Protokoll · Alben"]
       S --> P --> W
     end
     F["Freigabe Bildsuche<br/>config/searches.yaml<br/>reports/"]
-    D["docker/bildsuche/data<br/>Indizes · Modelle · Protokoll · photos.env"]
+    D["docker/bildsuche/data<br/>Indizes · Themen · Vorschaubilder · Modelle · Protokoll · photos.env"]
     PH["Synology Photos<br/>Freigegebener Bereich · Alben"]
     A --> S
     P <--> D
@@ -42,7 +42,7 @@ Synology Photos nur an, wenn ein Album angelegt oder gelöscht wird.
 | Komponente | Technik |
 |---|---|
 | Laufzeit | Python 3.11, PyTorch (CPU), open_clip, Pillow, pillow-heif, rawpy, NumPy, PyYAML |
-| Index | SQLite, Embeddings als float16, im Betrieb komplett im RAM |
+| Index | SQLite, Embeddings als float16, im Betrieb komplett im RAM (auch die Prüf-Vektoren als float16) |
 | Webserver | Python `http.server` (ThreadingHTTPServer), statische Reports + kleine JSON-API |
 | Album-Anbindung | inoffizielle Synology-Photos-Web-API (`SYNO.Foto.*`, `SYNO.FotoTeam.*`) |
 
@@ -93,6 +93,9 @@ Sekunden neu berechnet und der Report vollständig neu aufgebaut; bereits geprü
   (falsche Konfiguration, nicht eingebundenes Laufwerk).
 - **Reihenfolge:** zufällig, damit Zwischen-Reports Stichproben aus allen Jahren sind.
 - **Offline:** Nach dem ersten erfolgreichen Modell-Download startet der Container ohne Internetzugriff.
+- **Speicher beim Neu-Scan:** Der alte Index wird freigegeben, **bevor** der neue geladen wird (sonst lag er kurz
+  doppelt im RAM und der Container lief regelmäßig in `mem_limit`). Hält gerade die Themen-Berechnung den Index,
+  wartet der Neu-Scan darauf. Die Prüf-Scores werden stückweise (20.000 Bilder) berechnet.
 
 ## Konfiguration (`searches.yaml`)
 
@@ -151,7 +154,11 @@ Port 8091, ohne Passwort. Abschalten: `WEB_PORT=0` in `compose.yaml`.
 | `/protokoll`, `/protokoll.txt` | Programmprotokoll, neueste oben, Filter, Download |
 | `/api/album`, `/api/album/status` | Album-Aufträge |
 | `/api/report/delete` | Löschen eines älteren Reports (nicht für aktive Suchen) |
-| `/assistent`, `/api/assistent/*` | Assistent für neue Suchen (Info, Probesuche, Probebilder, Auswerten und Speichern) |
+| `/assistent`, `/api/assistent/*` | Assistent für neue Suchen (Info, Probesuche, Probebilder, Auswerten und Speichern); `/assistent?thema=<n>` übernimmt den Suchvorschlag einer Themen-Gruppe |
+| `/themen` | Bilder nach Themen erkunden (siehe unten) |
+| `/api/themen?n=&p=&alle=` | Gruppe `n` mit Untergruppen bzw. Seite `p` ihrer Bilder (120 pro Seite) |
+| `/api/themen/status`, `/api/themen/neu` | Stand der Berechnung; Neuberechnung anstoßen (POST) |
+| `/api/themen/bild?k=&g=` | Vorschau (240 px) bzw. große Ansicht (`g=1`); nur über die Position im Themenbaum, nie über einen Pfad |
 
 **Bildansicht:** „Bild öffnen“ zeigt das Bild groß über dem Report (auch als iPad-Web-App), Blättern per Wischen,
 Pfeilen oder Tastatur, „Auswählen“ fürs Album, Schließen per ✕, Esc oder Zurück-Geste.
@@ -187,6 +194,40 @@ Bei „passt nicht“ kann die Nutzerin notieren, was stattdessen zu sehen ist �
 (F-Maß; Gewichtung nach Strenge). Ohne genügend geprüfte Bilder gilt der Startwert der Strenge.
 **Speichern:** Der Abschnitt wird mit Kommentar am Ende von `searches:` eingefügt (Kommentare bleiben erhalten),
 vorher geprüft und gesichert; wirksam nach ca. 30 Sekunden. Die Prüfung der neuen Kandidaten läuft danach im Hintergrund.
+
+## Themen „Bilder nach Themen erkunden“
+
+Ohne Suchbegriff durch das ganze Archiv stöbern: Die Bilder werden anhand ihrer Vektoren automatisch in Gruppen
+und Untergruppen eingeteilt und mit deutschen Begriffen benannt. Erreichbar über die Übersicht (Knopf „▦ Bilder nach
+Themen erkunden“) oder `/themen`.
+
+**Gruppen:** hierarchisches k-Means auf den Gesamtbild-Vektoren (Stufe 1), ergänzt um die Kacheln (Stufe 2), soweit
+schon gerechnet. Oben `THEMEN_TOP_K` = 12 grobe Themen, darunter je bis zu `THEMEN_SUB_K` = 10 Untergruppen, bis eine
+Gruppe höchstens `THEMEN_LEAF` = 80 Bilder hat. k-Means rechnet auf einer Stichprobe von 20.000 Bildern, die
+Zuordnung danach gilt für alle. Die Bilder sind so sortiert, dass jede Gruppe ein zusammenhängender Abschnitt ist.
+
+**Namen:** aus einer festen Begriffsliste in drei Ebenen (`THEMEN_TAXONOMIE`, „Oberbegriff | Bereich: Begriff; …“,
+z. B. „Berge | Klettern: Klettern; Klettersteig; Bergsteigen“). Gewählt wird der Begriff, Bereich oder Oberbegriff,
+der die Untergruppen am besten **abdeckt** und sich am besten von den Geschwistern **abgrenzt**; Geschwister teilen
+keine Begriffe, ein Name wiederholt keinen Namen weiter oben im Pfad, bei Bedarf zwei Begriffe („Berge & Seen“).
+Bei geprüften Bildern fließt das starke Modell (Stufe 3) ein, dazu die bestätigten Treffer der Suchen
+(ab 30 Treffern je Suche).
+
+**Querverweise:** Bilder, die fast genauso gut in eine Nachbargruppe passen, erscheinen dort unter „Passt auch
+hierher“; in der Bildansicht führt „↔ passt auch woanders“ zur anderen Gruppe.
+
+**Suchvorschlag je Gruppe:** Positiv sind Begriffe, die in der Gruppe häufig und im Archiv selten sind; negativ
+Begriffe der ähnlichsten Nachbargruppen. „Als Suche verwenden“ zeigt den fertigen Block für `searches.yaml` zum
+Kopieren; „Im Assistenten öffnen“ übernimmt Formulierungen, Ausschlüsse und Namen in den Assistenten (Schritt 4)
+– so werden Schwellen mit Probebildern kalibriert.
+
+**Berechnung:** im Hintergrund in sechs Schritten (Begriffe vorbereiten, Bildmerkmale zusammenführen, Gruppen bilden,
+Gruppen benennen, Querverweise suchen, Vorschaubilder vorbereiten), Fortschritt auf der Seite. Automatisch einmal pro
+Scan, sobald Stufe 1 zu mindestens 98 % fertig ist und noch kein Baum existiert oder sich mindestens 2 %
+der Bilder geändert haben; sonst per „neu berechnen“. Die bisherige Einteilung bleibt währenddessen nutzbar.
+Der Thread läuft bewusst **ohne** gesenkte Priorität (sonst bekommt er neben der Bildsuche kaum Rechenzeit).
+Ergebnis: `data/themen/<index>.json.gz` (ein Baum pro Bildpfad, wie die Indizes); Vorschaubilder in `data/thumbs/`,
+die oberen zwei Ebenen werden vorab erzeugt, der Browser darf sie eine Woche zwischenspeichern.
 
 ## Synology-Photos-Alben
 
@@ -236,7 +277,7 @@ Album-Rolle, und erscheint daher auch in geteilten Alben. Schutz: Papierkorb der
 |---|---|
 | Priorität | `cpu_shares: 256` (der Synology-Kernel unterstützt keine harte CPU-Grenze per `cpus:`) |
 | Threads | `THREADS=4`, weniger Last mit `THREADS=2` |
-| Speicher | `mem_limit: 7g` (beide Modelle + Index im RAM) |
+| Speicher | `mem_limit: 7g` (beide Modelle + Index im RAM; Themen-Berechnung kurzzeitig zusätzlich) |
 | Neustart | `restart: unless-stopped`; Code wird aus `app/` eingebunden, Update = Datei ersetzen + Neustart |
 | Datensicherung | Papierkorb für `photo`, Hyper Backup; verschwundene Bilder stehen mit Namen im Protokoll |
 
@@ -249,3 +290,5 @@ Album-Rolle, und erscheint daher auch in geteilten Alben. Schutz: Papierkorb der
 - Die Album-Funktion nutzt eine inoffizielle API und kann nach Updates von Synology Photos brechen –
   nach Updates zuerst den Probelauf testen.
 - Bilder außerhalb des Freigegebenen Bereichs lassen sich durchsuchen, aber nicht in Alben übernehmen.
+- Themen-Namen kommen aus einer festen Begriffsliste; was dort fehlt, kann nicht als Name erscheinen.
+  Die Einteilung ist statistisch und ändert sich bei jeder Neuberechnung leicht.

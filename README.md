@@ -15,10 +15,12 @@ Album in **Synology Photos** übernehmen. Keine Cloud, keine Bilder verlassen di
 - **Drei Stufen für hohe Trefferqualität:** schnelles mehrsprachiges CLIP-Modell für alle Bilder,
   Kacheln für Motive am Bildrand, starkes Modell (SigLIP 2, 384 px) zur Prüfung der Kandidaten
 - **Deutsche Suchbegriffe** mit Gegenkategorien, Schwellen pro Suche und automatisch wachsender Kandidatenmenge
-- **Webseite** (Port 8091): Übersicht mit Fortschritt, Reports mit Vorschaubildern, große Bildansicht mit Blättern,
+- **Webseite** (Port 8091): Übersicht mit Fortschritt, Reports mit Vorschaubildern, Themen, große Bildansicht mit Blättern,
   CSV-Export, Konfigurationseditor mit Prüfung, Protokoll
 - **Synology-Photos-Alben:** alle bestätigten Treffer oder eine Auswahl per Klick ins Album, Teilen mit Benutzern,
   Album löschen, Probelauf
+- **Bilder nach Themen erkunden:** das ganze Archiv automatisch in benannte Gruppen und Untergruppen eingeteilt
+  (z. B. Berge › Klettern), mit Querverweisen und einem Suchvorschlag je Gruppe, der direkt in den Assistenten führt
 - **Assistent für neue Suchen:** Schritt für Schritt mit Erklärungen, Probebildern aus dem eigenen Archiv und automatisch eingestellten Schwellen – ohne die Konfigurationsdatei anzufassen
 - **Ein Index pro Bildpfad:** Wechsel des Ordners legt einen weiteren Index an, Zurückwechseln nutzt den alten weiter
 - **Ressourcenschonend:** läuft mit niedriger Priorität rund um die Uhr, erkennt neue Bilder automatisch

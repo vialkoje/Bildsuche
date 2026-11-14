@@ -22,7 +22,7 @@ Benutzerdoku: `README.md`, `docs/INSTALLATION.md`, `docs/SPEZIFIKATION.md`, `doc
 
 ## Aufbau
 
-Eine Datei: `app/bildsuche.py` (~2.100 Zeilen). Wichtige Teile in Reihenfolge:
+Eine Datei: `app/bildsuche.py` (~3.800 Zeilen). Wichtige Teile in Reihenfolge:
 
 | Bereich | Inhalt |
 |---|---|
@@ -35,6 +35,7 @@ Eine Datei: `app/bildsuche.py` (~2.100 Zeilen). Wichtige Teile in Reihenfolge:
 | `write_report`, `write_index`, `album_box`, `LIGHTBOX` | HTML/CSV der Reports, Übersichtsseite, Album-UI, Bildansicht |
 | `PhotosClient`, `album_job` | inoffizielle Synology-Photos-API (Login `session=webui`), Album anlegen/ergänzen/teilen/löschen |
 | `assist_*`, `config_add_search`, `ASSIST_PAGE` | Assistent „Neue Suche anlegen“: Probesuche, Kalibrierung, Eintrag in die Konfiguration |
+| `themen_*`, `THEMEN_TAXONOMIE`, `THEMEN_HTML` | Themen „Bilder nach Themen erkunden“: hierarchisches k-Means, Benennung aus der Begriffsliste, Querverweise, Suchvorschlag, Hintergrund-Job (`themen_job`, `THEMEN_STATE`), Baum in `data/themen/` |
 | `read_log_lines`, `protokoll_page` | Protokoll-Seite |
 | `start_web` | `ThreadingHTTPServer`: statische Reports + `/bild`, `/config`, `/protokoll`, `/api/*` |
 | `main` | Start, Modell-Download/Offline-Modus, Hauptschleife, Scan alle 6 h |
@@ -75,3 +76,7 @@ Echte Tests gegen die NAS macht der Nutzer; Ergebnisse schickt er als Protokoll 
 - Änderungen an `compose.yaml`: Projekt stoppen und neu erstellen.
 - Die Konfiguration der NAS (`Bildsuche/config/searches.yaml`) enthält die echten Werte und wird nie aus dem
   Repository überschrieben.
+- **Das Repository ist führend:** Änderungen nur hier machen, committen und von hier ausrollen. Bringt der Nutzer
+  eine Datei von der NAS mit, zuerst mit `app/bildsuche.py` vergleichen (`diff`), persönliche Werte entfernen
+  und fehlende Fixes nachziehen – im November 2026 waren NAS und Repository auseinandergelaufen.
+- Nach dem Ausrollen die laufende Version in `CLAUDE.local.md` nachtragen.

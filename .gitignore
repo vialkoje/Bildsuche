@@ -1,0 +1,15 @@
+# Persönliche Werte und Zugangsdaten – nie ins Repository
+CLAUDE.local.md
+data/photos.env
+config/searches.yaml
+
+# Laufzeitdaten
+data/indexes/
+data/themen/
+data/thumbs/
+data/logs/
+reports/
+
+__pycache__/
+*.pyc
+.DS_Store
