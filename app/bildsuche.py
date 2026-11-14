@@ -69,7 +69,7 @@ try:
 except Exception:  # pragma: no cover
     rawpy = None
 
-VERSION = "2026-11-13c"
+VERSION = "2026-11-14a"
 CONFIG_PATH = os.environ.get("CONFIG", "/config/searches.yaml")
 REPORT_DIR = os.environ.get("REPORTS", "/reports")
 THREADS = int(os.environ.get("THREADS", "2"))
@@ -1146,8 +1146,12 @@ def write_status(counts, summary, final):
     write_index(counts, summary, final)
 
 
+LAST_INDEX = [None]      # letzte Daten der Übersicht – damit sie nach dem Löschen sofort neu geschrieben werden kann
+
+
 def write_index(counts, summary, final):
     """Übersichtsseite reports/index.html – im Browser über die Webseite oder als Datei."""
+    LAST_INDEX[0] = (counts, summary, final)
     n, g, t, c, r = counts
     pct = lambda a, b: f"{100 * a / b:.0f} %" if b else "–"  # noqa: E731
     pw = lambda a, b: f"{100 * a / b:.1f}%" if b else "0%"  # noqa: E731
@@ -3616,6 +3620,11 @@ def start_web():
                         return self._json(400, {"message": "Ungültiger Name."})
                     shutil.rmtree(target)
                     log.info("Alter Report '%s' über die Webseite gelöscht.", name)
+                    if LAST_INDEX[0]:
+                        try:
+                            write_index(*LAST_INDEX[0])      # Übersicht sofort ohne den gelöschten Report
+                        except Exception as e:
+                            log.warning("Übersicht konnte nicht sofort aktualisiert werden: %s", e)
                     return self._json(200, {"message": f"Report „{name}“ gelöscht."})
                 except Exception as e:
                     return self._json(500, {"message": f"Löschen fehlgeschlagen: {e}"})

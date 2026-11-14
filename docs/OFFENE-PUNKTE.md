@@ -2,8 +2,6 @@
 
 ## Technisch
 
-- [ ] Fix aus 2026-10-30c wieder einbauen: Übersicht nach dem Löschen eines älteren Reports sofort neu schreiben
-  (`LAST_INDEX`) – fehlt in 2026-11-13c, weil diese Version auf 2026-10-30b aufbaut
 - [ ] Vor dem ersten Ausrollen aus dem Repository prüfen, dass `link_root`, `web_base`, `photos_url` und
   `photos_share_with` in `searches.yaml` der NAS stehen – auf der NAS standen sie bis 2026-11-13c in den `DEFAULTS`
   des Codes, im Repository sind dort nur Platzhalter

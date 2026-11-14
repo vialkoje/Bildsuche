@@ -1,6 +1,6 @@
 # Spezifikation
 
-Stand: Version 2026-11-13c
+Stand: Version 2026-11-14a
 
 ## Zweck
 
